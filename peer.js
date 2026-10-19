@@ -205,7 +205,7 @@ export function startPeerServer(options) {
           const body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'))
           const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
           if (workspaceId === '') throw new PeerError(400, 'workspace-required')
-          const sessionId = await options.createSession(workspaceId)
+          const sessionId = await options.createSession(workspaceId, callerId)
           if (typeof store.touchPeer === 'function') await store.touchPeer(callerId)
           sendJson(res, 200, { protocol: PROTOCOL, sessionId })
           return
@@ -240,6 +240,36 @@ export function startPeerServer(options) {
           if (sessionId === '') throw new PeerError(400, 'session-required')
           const tail = await options.tailSession(sessionId, Number.isFinite(since) ? since : 0)
           sendJson(res, 200, { protocol: PROTOCOL, ...tail })
+          return
+        }
+
+        if (req.method === 'GET' && path === '/session/approvals') {
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const approvals = typeof options.listApprovals === 'function' ? options.listApprovals(peer.deviceId) : []
+          sendJson(res, 200, { protocol: PROTOCOL, approvals })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/session/approvals/respond') {
+          const raw = await readRawBody(req)
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, raw, publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'))
+          const id = typeof body.id === 'string' ? body.id : ''
+          const outcome = typeof body.outcome === 'string' ? body.outcome : ''
+          if (id === '' || outcome === '') throw new PeerError(400, 'id-and-outcome-required')
+          const accepted = typeof options.respondApproval === 'function'
+            ? options.respondApproval(peer.deviceId, id, outcome)
+            : false
+          if (!accepted) throw new PeerError(404, 'approval-not-found')
+          sendJson(res, 200, { protocol: PROTOCOL, accepted: true })
           return
         }
 
@@ -447,6 +477,20 @@ export async function peerSessionTail(options) {
     method: 'GET',
     path: `/session/tail?${query.toString()}`,
     timeoutMs: options.timeoutMs ?? 4000,
+  })
+}
+
+export async function peerApprovals(options) {
+  const data = await signedCall({ ...options, method: 'GET', path: '/session/approvals', timeoutMs: options.timeoutMs ?? 4000 })
+  return (data && data.approvals) || []
+}
+
+export async function peerApprovalRespond(options) {
+  return await signedCall({
+    ...options,
+    method: 'POST',
+    path: '/session/approvals/respond',
+    body: { id: options.id, outcome: options.outcome },
   })
 }
 

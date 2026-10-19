@@ -4,7 +4,7 @@ Peer-to-peer control plane for [DeepSeek Harness](https://github.com/deepseek-ai
 
 多个 DSH 实例互相配对，共享**工作区引用**与在线状态；数据从不复制——会话、文件、模型凭据、插件配置永远留在属主实例上。
 
-> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 会话目录 / 授权）、**属主 UI 回环代理（带 token 交接）**、**远程任务（建会话 + 提交 prompt + 事件尾部）**与无头 CLI 已可用；审批回传待做。
+> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 会话目录 / 授权）、**属主 UI 回环代理（带 token 交接）**、**远程任务（建会话 + 提交 prompt + 事件尾部 + 审批回传）**与无头 CLI 已可用；真流式与提问回传待做。
 
 ## 设计边界
 
@@ -53,6 +53,8 @@ peer 监听默认 `127.0.0.1:3071`，只承载控制面消息。
 | POST | `/session/create` | 在属主新建会话（`workspaceId`）；需 `sessionAccess` |
 | POST | `/session/prompt` | 向属主会话提交 prompt（`sessionId`、`text`）；需 `sessionAccess` |
 | GET | `/session/tail` | 从游标读属主会话的新事件（用户/助手/工具/回合结束）；需 `sessionAccess` |
+| GET | `/session/approvals` | 列出等待决定的审批（仅该 peer 发起会话的审批）；需 `sessionAccess` |
+| POST | `/session/approvals/respond` | 回传 `allowed-once` / `rejected` / `cancelled`；需 `sessionAccess` |
 | GET | `/tunnel`（Upgrade） | 签名升级后进入字节隧道；每个流被转发到属主 `127.0.0.1:<web 端口>`，需属主开启 `uiAccess` |
 
 - 每次请求签名 `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`，时间窗 ±60s，nonce 去重防重放。
@@ -147,6 +149,7 @@ dsh plugin --profile web add ./dsh-fleet
 | POST | `/api/dsh-fleet/peers/sessions` | 拉取该 peer 的会话元数据 |
 | POST | `/api/dsh-fleet/peers/task` | 在属主建会话并提交一句话，返回 `taskId`/`sessionId` |
 | POST | `/api/dsh-fleet/peers/task/poll` | 读取任务的新事件（游标在 Hub 内存中） |
+| POST | `/api/dsh-fleet/peers/task/approve` | 回传一次审批决定 |
 | GET | `/api/dsh-fleet/workspaces` | 本机工作区列表（供授权选择） |
 
 全部同源校验；私钥不出主机进程。
@@ -155,7 +158,7 @@ dsh plugin --profile web add ./dsh-fleet
 
 1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验、设置页 peer 面板 —— 已完成。
 2. **P2 呈现**：属主 UI 回环代理（隧道 + `uiAccess` 授权，数据只透传）—— 已完成；点「界面」即在本机端口打开属主 DSH。
-3. **P3 会话**：会话目录、远端建会话 + 提交 prompt + 事件尾部已完成；审批/提问回传与真流式待做（目前可在属主界面处理审批）。
+3. **P3 会话**：会话目录、远端建会话 + 提交 prompt + 事件尾部、审批回传已完成；提问（`ask_user_question`）回传与真流式待做。
 4. **P4 网络**：局域网发现、中继、跨网。
 
 ## 安全说明
@@ -165,6 +168,7 @@ dsh plugin --profile web add ./dsh-fleet
 - peer 通道默认只监听回环；打开局域网绑定前请确认网络可信，跨公网请置于 WireGuard/Tailscale 之后。
 - `uiAccess` 默认关闭；开启等于把本机 DSH 界面（进而 shell）交给该 peer，只对可信设备开启。
 - `sessionAccess` 默认关闭；开启后对方可以在本机**新建会话并提交 prompt**，等同于远程指挥 Agent 执行命令，只对可信设备开启。
+- 审批只对**该 peer 自己发起**的会话生效；60 秒无回应则回落到本机审批界面，不会被远程静默放行。
 
 ## License
 

@@ -96,6 +96,8 @@ window.__ModuleLoader__.load({
         taskFailed: '任务失败',
         taskNeeds: '先选工作区并输入内容',
         openOwnerUi: '打开属主界面',
+        approveOnce: '允许一次',
+        reject: '拒绝',
       },
       en: {
         section: 'DSH Fleet',
@@ -187,6 +189,8 @@ window.__ModuleLoader__.load({
         taskFailed: 'Task failed',
         taskNeeds: 'Pick a workspace and type something',
         openOwnerUi: 'Open owner UI',
+        approveOnce: 'Allow once',
+        reject: 'Reject',
       },
     }
 
@@ -508,6 +512,7 @@ window.__ModuleLoader__.load({
                 ...task,
                 messages: task.messages.concat(incoming),
                 running: data && data.running === true,
+                approvals: (data && Array.isArray(data.approvals)) ? data.approvals : (task.approvals || []),
               },
             }
           })
@@ -530,7 +535,7 @@ window.__ModuleLoader__.load({
           const data = await api('/api/dsh-fleet/peers/task', { deviceId: peer.deviceId, workspaceId, text })
           setTasks((prev) => ({
             ...prev,
-            [data.taskId]: { deviceId: peer.deviceId, sessionId: data.sessionId, messages: [], running: true },
+            [data.taskId]: { deviceId: peer.deviceId, sessionId: data.sessionId, messages: [], approvals: [], running: true },
           }))
           setTaskPeer((prev) => ({ ...prev, [peer.deviceId]: data.taskId }))
           setTaskDraft((prev) => ({ ...prev, [peer.deviceId]: '' }))
@@ -543,6 +548,15 @@ window.__ModuleLoader__.load({
 
       const activeTaskIds = useMemo(() => Object.keys(tasks).join(','), [tasks])
 
+      const decideApproval = useCallback(async (taskId, approvalId, outcome) => {
+        setError('')
+        try {
+          await api('/api/dsh-fleet/peers/task/approve', { taskId, approvalId, outcome })
+          await pollTask(taskId)
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [pollTask])
       useEffect(() => {
         if (activeTaskIds === '') return undefined
         const ids = activeTaskIds.split(',')
@@ -877,6 +891,34 @@ window.__ModuleLoader__.load({
                               },
                                 h('span', { style: { opacity: 0.5, marginRight: 6 } }, message.role),
                                 h('span', null, message.text || ''))),
+                          task.approvals && task.approvals.length > 0
+                            ? h('div', {
+                                style: {
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 4,
+                                  marginTop: 4,
+                                  padding: '6px 8px',
+                                  borderRadius: 8,
+                                  border: '1px solid color-mix(in srgb, #f59e0b 45%, transparent)',
+                                  background: 'color-mix(in srgb, #f59e0b 10%, transparent)',
+                                },
+                              },
+                                task.approvals.map((approval) => h('div', {
+                                  key: approval.id,
+                                  style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 },
+                                },
+                                  h('span', { style: { fontWeight: 600 } }, approval.toolName),
+                                  h('span', { style: { opacity: 0.7 } }, approval.reason || ''),
+                                  h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6 } },
+                                    h(Button, {
+                                      primary: true,
+                                      onClick: () => decideApproval(taskPeer[peer.deviceId], approval.id, 'allowed-once'),
+                                    }, t.approveOnce),
+                                    h(Button, {
+                                      onClick: () => decideApproval(taskPeer[peer.deviceId], approval.id, 'rejected'),
+                                    }, t.reject)))))
+                            : null,
                           h('div', null, h(Button, { onClick: () => openUi(peer) }, t.openOwnerUi)))
                       : null)
                 : null,

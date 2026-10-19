@@ -54,6 +54,9 @@ const ctx = {
     if (name === 'agents') return { get: () => undefined }
     return undefined
   },
+  on() {
+    return () => {}
+  },
   webServer: {
     port: 5999,
     register(route) {

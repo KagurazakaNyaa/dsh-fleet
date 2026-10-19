@@ -28,6 +28,9 @@ const ctx = {
     }
     return undefined
   },
+  on() {
+    return () => {}
+  },
   webServer: {
     port: 5999,
     register(route) {

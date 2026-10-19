@@ -32,6 +32,8 @@ const HELP = `dsh-fleet CLI
   task <deviceId> <wsId> <text...>
                                create a session on the peer and submit text
   task-poll <taskId>           read new events of a submitted task
+  task-approve <taskId> <approvalId> [allow|deny]
+                               answer a pending approval on the owner
   session-access <deviceId> [--revoke]
                                allow or revoke a peer's access to this session list
   grant <deviceId> <wsId> [--revoke]
@@ -179,6 +181,13 @@ async function main() {
   if (command === 'task-poll') {
     if (!first) throw new Error('task-poll requires <taskId>')
     print(await call(flags, '/peers/task/poll', { taskId: first }), flags)
+    return
+  }
+
+  if (command === 'task-approve') {
+    if (!first || !second) throw new Error('task-approve requires <taskId> <approvalId> [allow|deny]')
+    const outcome = positional[3] === 'deny' ? 'rejected' : 'allowed-once'
+    print(await call(flags, '/peers/task/approve', { taskId: first, approvalId: second, outcome }), flags)
     return
   }
 

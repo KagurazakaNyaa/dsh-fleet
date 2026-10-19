@@ -3,6 +3,8 @@ import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promi
 import os from 'node:os'
 import path from 'node:path'
 import {
+  peerApprovalRespond,
+  peerApprovals,
   peerPair,
   peerSessionCreate,
   peerSessionPrompt,
@@ -498,11 +500,64 @@ async function tailSessionForPeer(ctx, sessionId, since) {
   return { frames, cursor: last + 1, running: Boolean(agent) }
 }
 
-async function createSessionForPeer(ctx, workspaceId) {
+const fleetSessions = new Map()
+const pendingApprovals = new Map()
+
+async function createSessionForPeer(ctx, workspaceId, deviceId) {
   const controller = ctx.get('sessionController')
   if (!controller || typeof controller.create !== 'function') throw new Error('session-create-unavailable')
   const value = await controller.create({ workspaceId })
-  return String(value.sessionId)
+  const sessionId = String(value.sessionId)
+  fleetSessions.set(sessionId, String(deviceId || ''))
+  return sessionId
+}
+
+async function handleApprovalRequest(request, next) {
+  const sessionId = request && request.agent && request.agent.id
+  if (!sessionId || !fleetSessions.has(sessionId)) return await next()
+  const deviceId = fleetSessions.get(sessionId)
+  const id = randomUUID()
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingApprovals.delete(id)
+      resolve(null)
+    }, 60_000)
+    pendingApprovals.set(id, {
+      id,
+      sessionId,
+      deviceId,
+      toolName: String(request.toolName || ''),
+      reason: String(request.reason || ''),
+      createdAt: Date.now(),
+      answer(value) {
+        clearTimeout(timer)
+        pendingApprovals.delete(id)
+        resolve(value)
+      },
+    })
+  })
+  if (outcome === null) return await next()
+  return outcome
+}
+
+function listApprovalsForPeer(deviceId) {
+  return [...pendingApprovals.values()]
+    .filter((item) => item.deviceId === deviceId)
+    .map((item) => ({
+      id: item.id,
+      sessionId: item.sessionId,
+      toolName: item.toolName,
+      reason: item.reason,
+      createdAt: item.createdAt,
+    }))
+}
+
+function respondApprovalForPeer(deviceId, id, outcome) {
+  const pending = pendingApprovals.get(id)
+  if (!pending || pending.deviceId !== deviceId) return false
+  if (outcome !== 'allowed-once' && outcome !== 'rejected' && outcome !== 'cancelled') return false
+  pending.answer(outcome)
+  return true
 }
 
 async function promptSessionForPeer(ctx, sessionId, text) {
@@ -768,12 +823,43 @@ async function handleTaskPoll(req, res) {
   const tail = await peerSessionTail({ address: peer.address, identity, sessionId: task.sessionId, since: task.cursor })
   const cursor = Number(tail && tail.cursor)
   if (Number.isFinite(cursor) && cursor >= task.cursor) task.cursor = cursor
+  let approvals = []
+  try {
+    const all = await peerApprovals({ address: peer.address, identity })
+    approvals = all.filter((item) => item.sessionId === task.sessionId)
+  } catch {
+    approvals = []
+  }
   sendJson(res, 200, {
     sessionId: task.sessionId,
     messages: (tail && tail.frames) || [],
     running: Boolean(tail && tail.running),
+    approvals,
     cursor: task.cursor,
   })
+}
+
+async function handleTaskApprove(req, res) {
+  const body = await readBody(req)
+  const task = tasks.get(String(body.taskId || ''))
+  if (!task) {
+    sendJson(res, 404, { message: 'task-not-found' })
+    return
+  }
+  const peer = await peerStore.getPeer(task.deviceId)
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const id = cleanText(body.approvalId, 100)
+  const outcome = String(body.outcome || '')
+  if (id === '' || !['allowed-once', 'rejected', 'cancelled'].includes(outcome)) {
+    sendJson(res, 400, { message: 'approval-id-and-outcome-required' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  await peerApprovalRespond({ address: peer.address, identity, id, outcome })
+  sendJson(res, 200, { accepted: true })
 }
 
 async function handlePeerSessions(req, res) {
@@ -866,6 +952,7 @@ export function apply(ctx) {
     ['/peers/sessions', 'POST', handlePeerSessions],
     ['/peers/task', 'POST', handlePeerTask],
     ['/peers/task/poll', 'POST', handleTaskPoll],
+    ['/peers/task/approve', 'POST', handleTaskApprove],
     ['/peers/delete', 'POST', handlePeerDelete],
     ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
@@ -888,6 +975,8 @@ export function apply(ctx) {
     }), `dsh-fleet: ${method} ${route}`)
   }
 
+  ctx.on('approval/request', (request, next) => handleApprovalRequest(request, next), { prepend: true, global: true })
+
   ctx.effect(() => {
     let peerServer = null
     let disposed = false
@@ -899,9 +988,11 @@ export function apply(ctx) {
         listWorkspaces: () => listLocalWorkspaces(ctx),
         listSessions: () => listRemoteSessions(ctx),
         uiToken: () => uiTokenFor(ctx),
-        createSession: (workspaceId) => createSessionForPeer(ctx, workspaceId),
+        createSession: (workspaceId, deviceId) => createSessionForPeer(ctx, workspaceId, deviceId),
         promptSession: (sessionId, text) => promptSessionForPeer(ctx, sessionId, text),
         tailSession: (sessionId, since) => tailSessionForPeer(ctx, sessionId, since),
+        listApprovals: (deviceId) => listApprovalsForPeer(deviceId),
+        respondApproval: (deviceId, id, outcome) => respondApprovalForPeer(deviceId, id, outcome),
         verifyToken: (candidate) => verifyWebToken(ctx, candidate),
         tunnelTargetPort: Number(ctx.webServer && ctx.webServer.port) || 0,
         name: os.hostname(),
