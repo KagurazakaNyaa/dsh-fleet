@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqu
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { peerPair, peerWorkspaces, startPeerServer } from './peer.js'
+import { peerPair, peerSessions, peerWorkspaces, startPeerServer } from './peer.js'
 import { connectTunnel, startUiProxy } from './tunnel.js'
 
 export const name = 'dsh-fleet'
@@ -327,6 +327,7 @@ const peerStore = {
       ...record,
       grants: Array.isArray(record.grants) ? record.grants : (previous && Array.isArray(previous.grants) ? previous.grants : []),
       uiAccess: typeof record.uiAccess === 'boolean' ? record.uiAccess : Boolean(previous && previous.uiAccess),
+      sessionAccess: typeof record.sessionAccess === 'boolean' ? record.sessionAccess : Boolean(previous && previous.sessionAccess),
       pairedAt: (previous && previous.pairedAt) || record.pairedAt || Date.now(),
     }
     if (index === -1) state.peers.push(next)
@@ -368,6 +369,29 @@ function toPeerIdentity(identity) {
     publicPem: identity.publicKey,
     privatePem: identity.privateKey,
     pairingCode: identity.pairingCode,
+  }
+}
+
+/**
+ * Session metadata only: ids, titles, cwd and running state. Message content
+ * never leaves the owner through this call.
+ */
+async function listRemoteSessions(ctx) {
+  const controller = ctx.get('sessionController')
+  if (!controller || typeof controller.list !== 'function') return []
+  try {
+    const value = await controller.list({}, new AbortController().signal)
+    const items = (value && value.items) || []
+    return items.slice(0, 50).map((item) => ({
+      sessionId: String(item.sessionId),
+      updatedAt: Number(item.updatedAt) || 0,
+      running: Boolean(item.running),
+      cwd: typeof item.cwd === 'string' ? item.cwd : '',
+      parentSessionId: item.parentSessionId ? String(item.parentSessionId) : '',
+      title: (item.projections && item.projections.values && item.projections.values.title) || '',
+    }))
+  } catch {
+    return []
   }
 }
 
@@ -614,6 +638,35 @@ async function handlePeerUi(req, res) {
   sendJson(res, 200, { url: `http://127.0.0.1:${proxy.port}/`, port: proxy.port })
 }
 
+async function handlePeerSessions(req, res) {
+  const body = await readBody(req)
+  const peer = await peerStore.getPeer(String(body.deviceId || ''))
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const target = splitAddress(peer.address)
+  if (target === null) {
+    sendJson(res, 409, { message: 'peer-has-no-address' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  const sessions = await peerSessions({ address: peer.address, identity })
+  await peerStore.touchPeer(peer.deviceId)
+  sendJson(res, 200, { sessions })
+}
+
+async function handleSessionAccess(req, res) {
+  const body = await readBody(req)
+  const peer = await peerStore.getPeer(String(body.deviceId || ''))
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const next = await peerStore.upsertPeer({ ...peer, sessionAccess: body.allow === true })
+  sendJson(res, 200, { peer: next })
+}
+
 async function handlePeerDelete(req, res) {  const body = await readBody(req)
   const deviceId = String(body.deviceId || '')
   const state = await loadPeers()
@@ -671,6 +724,8 @@ export function apply(ctx) {
     ['/peers/grant', 'POST', handleGrant],
     ['/peers/ui-access', 'POST', handleUiAccess],
     ['/peers/ui', 'POST', handlePeerUi],
+    ['/peers/session-access', 'POST', handleSessionAccess],
+    ['/peers/sessions', 'POST', handlePeerSessions],
     ['/peers/delete', 'POST', handlePeerDelete],
     ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
@@ -702,6 +757,7 @@ export function apply(ctx) {
         identity: toPeerIdentity(identity),
         store: peerStore,
         listWorkspaces: () => listLocalWorkspaces(ctx),
+        listSessions: () => listRemoteSessions(ctx),
         verifyToken: (candidate) => verifyWebToken(ctx, candidate),
         tunnelTargetPort: Number(ctx.webServer && ctx.webServer.port) || 0,
         name: os.hostname(),

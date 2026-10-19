@@ -28,6 +28,9 @@ const HELP = `dsh-fleet CLI
   peers                        list paired peers
   workspaces <deviceId>        fetch that peer's granted workspace metadata
   workspaces-local             list this instance's workspaces
+  sessions <deviceId>          list that peer's session metadata
+  session-access <deviceId> [--revoke]
+                               allow or revoke a peer's access to this session list
   grant <deviceId> <wsId> [--revoke]
                                allow or revoke a peer's access to a local workspace
   unpeer <deviceId>            forget a peer
@@ -154,6 +157,18 @@ async function main() {
 
   if (command === 'workspaces-local') {
     print(await call(flags, '/workspaces'), flags)
+    return
+  }
+
+  if (command === 'sessions') {
+    if (!first) throw new Error('sessions requires <deviceId>')
+    print(await call(flags, '/peers/sessions', { deviceId: first }), flags)
+    return
+  }
+
+  if (command === 'session-access') {
+    if (!first) throw new Error('session-access requires <deviceId>')
+    print(await call(flags, '/peers/session-access', { deviceId: first, allow: flags.revoke !== true }), flags)
     return
   }
 

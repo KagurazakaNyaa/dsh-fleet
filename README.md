@@ -4,7 +4,7 @@ Peer-to-peer control plane for [DeepSeek Harness](https://github.com/deepseek-ai
 
 多个 DSH 实例互相配对，共享**工作区引用**与在线状态；数据从不复制——会话、文件、模型凭据、插件配置永远留在属主实例上。
 
-> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 授权）、**属主 UI 回环代理**与无头 CLI 已可用；P3 会话流待做。
+> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 会话目录 / 授权）、**属主 UI 回环代理**与无头 CLI 已可用；P3 的远程提问与事件流待做。
 
 ## 设计边界
 
@@ -48,6 +48,7 @@ peer 监听默认 `127.0.0.1:3071`，只承载控制面消息。
 | GET | `/hello` | 返回 `protocol`、`deviceId`、`name`、公钥（未签名） |
 | POST | `/pair` | 携带对端配对码 **或** `dsh web` 启动时打印的 token + Ed25519 签名；成功后双向固定公钥 |
 | GET | `/workspaces` | 签名请求；只返回属主已授权的工作区**元数据** |
+| GET | `/sessions` | 签名请求；返回属主会话的 ID、标题、目录与运行状态，**不含消息内容**；需 `sessionAccess` |
 | GET | `/tunnel`（Upgrade） | 签名升级后进入字节隧道；每个流被转发到属主 `127.0.0.1:<web 端口>`，需属主开启 `uiAccess` |
 
 - 每次请求签名 `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`，时间窗 ±60s，nonce 去重防重放。
@@ -80,6 +81,7 @@ dsh-fleet pair 127.0.0.1:3071 --code ABCD-EF01-... --local http://127.0.0.1:3080
 # 查 peer、拉对端工作区、授权本机工作区
 dsh-fleet peers --local http://127.0.0.1:3080
 dsh-fleet workspaces <deviceId> --local http://127.0.0.1:3080
+dsh-fleet sessions <deviceId> --local http://127.0.0.1:3080
 dsh-fleet grant <deviceId> <workspaceId> --local http://127.0.0.1:3080
 ```
 
@@ -137,6 +139,8 @@ dsh plugin --profile web add ./dsh-fleet
 | POST | `/api/dsh-fleet/peers/delete` | 删除 peer 记录 |
 | POST | `/api/dsh-fleet/peers/ui-access` | 允许/撤销该 peer 访问**本机**界面 |
 | POST | `/api/dsh-fleet/peers/ui` | 取该 peer 的界面代理地址（首次建立本机回环端口） |
+| POST | `/api/dsh-fleet/peers/session-access` | 允许/撤销该 peer 查看本机会话目录 |
+| POST | `/api/dsh-fleet/peers/sessions` | 拉取该 peer 的会话元数据 |
 | GET | `/api/dsh-fleet/workspaces` | 本机工作区列表（供授权选择） |
 
 全部同源校验；私钥不出主机进程。
@@ -145,7 +149,7 @@ dsh plugin --profile web add ./dsh-fleet
 
 1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验、设置页 peer 面板 —— 已完成。
 2. **P2 呈现**：属主 UI 回环代理（隧道 + `uiAccess` 授权，数据只透传）—— 已完成；点「界面」即在本机端口打开属主 DSH。
-3. **P3 会话流**：在属主建会话、订阅事件、回传输入与审批，本地只渲染。
+3. **P3 会话**：第一步（会话目录，只读元数据）已随 P3 完成；第二步是在属主建会话、提交 prompt、订阅事件流并回传审批 —— 待做。
 4. **P4 网络**：局域网发现、中继、跨网。
 
 ## 安全说明

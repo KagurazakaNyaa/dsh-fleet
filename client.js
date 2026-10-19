@@ -80,6 +80,11 @@ window.__ModuleLoader__.load({
         uiAccessDenied: '对方还没有授予界面访问权限',
         uiAccess: '允许访问界面',
         uiAccessHint: '开启后，对方可以把本机 DSH 界面代理到它自己的回环端口；等价于远程操作这台机器。关闭后新连接会被拒绝。',
+        sessionAccess: '允许查看会话',
+        sessionAccessHint: '对方能看到本机会话的标题、目录与运行状态；消息内容不会离开本机。',
+        sessionsBtn: '会话',
+        sessionsEmpty: '没有会话',
+        sessionsFailed: '获取会话失败',
       },
       en: {
         section: 'DSH Fleet',
@@ -155,6 +160,11 @@ window.__ModuleLoader__.load({
         uiAccessDenied: 'The peer has not granted UI access',
         uiAccess: 'Allow UI access',
         uiAccessHint: 'When enabled, this peer can proxy this DSH web UI onto its own loopback port — effectively remote control of this machine. Disabling rejects new connections.',
+        sessionAccess: 'Allow session list',
+        sessionAccessHint: 'Peers see titles, directories and running state of this machine\'s sessions; message content never leaves this machine.',
+        sessionsBtn: 'Sessions',
+        sessionsEmpty: 'No sessions',
+        sessionsFailed: 'Failed to fetch sessions',
       },
     }
 
@@ -270,6 +280,7 @@ window.__ModuleLoader__.load({
       const [remoteWorkspaces, setRemoteWorkspaces] = useState({})
       const [pairing, setPairing] = useState({ address: '', mode: 'token', credential: '' })
       const [grantFor, setGrantFor] = useState('')
+      const [remoteSessions, setRemoteSessions] = useState({})
 
       const probe = useCallback(async (list) => {
         if (!list || list.length === 0) return
@@ -420,10 +431,31 @@ window.__ModuleLoader__.load({
         }
       }, [t])
 
-      const toggleUiAccess = useCallback(async (peer, allow) => {
-        setError('')
+      const toggleUiAccess = useCallback(async (peer, allow) => {        setError('')
         try {
           const data = await api('/api/dsh-fleet/peers/ui-access', { deviceId: peer.deviceId, allow })
+          if (data && data.peer) {
+            setPeers((prev) => prev.map((item) => (item.deviceId === peer.deviceId ? data.peer : item)))
+          }
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [])
+
+      const fetchSessions = useCallback(async (peer) => {
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/peers/sessions', { deviceId: peer.deviceId })
+          setRemoteSessions((prev) => ({ ...prev, [peer.deviceId]: (data && data.sessions) || [] }))
+        } catch (harnessError) {
+          setError(`${t.sessionsFailed}: ${harnessError.message}`)
+        }
+      }, [t])
+
+      const toggleSessionAccess = useCallback(async (peer, allow) => {
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/peers/session-access', { deviceId: peer.deviceId, allow })
           if (data && data.peer) {
             setPeers((prev) => prev.map((item) => (item.deviceId === peer.deviceId ? data.peer : item)))
           }
@@ -673,6 +705,7 @@ window.__ModuleLoader__.load({
                 h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6 } },
                   h(Button, { onClick: () => openUi(peer) }, t.openUi),
                   h(Button, { onClick: () => refreshWorkspaces(peer) }, t.fetchWorkspaces),
+                  h(Button, { onClick: () => fetchSessions(peer) }, t.sessionsBtn),
                   h(Button, { onClick: () => setGrantFor(grantFor === peer.deviceId ? '' : peer.deviceId) }, t.grantLocal),
                   h(Button, { onClick: () => removePeer(peer) }, t.remove))),
               remote
@@ -685,6 +718,32 @@ window.__ModuleLoader__.load({
                         },
                           h('span', null, workspace.title),
                           h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, opacity: 0.6 } }, workspace.path))))
+                : null,
+              Array.isArray(remoteSessions[peer.deviceId])
+                ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+                    remoteSessions[peer.deviceId].length === 0
+                      ? h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.sessionsEmpty)
+                      : remoteSessions[peer.deviceId].map((session) => h('div', {
+                          key: session.sessionId,
+                          style: { display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 },
+                        },
+                          h('span', {
+                            style: {
+                              width: 8,
+                              height: 8,
+                              borderRadius: 999,
+                              background: session.running ? '#22c55e' : '#94a3b8',
+                              display: 'inline-block',
+                              flex: '0 0 auto',
+                            },
+                          }),
+                          h('span', null, session.title || session.sessionId),
+                          session.cwd
+                            ? h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, opacity: 0.55 } }, session.cwd)
+                            : null,
+                          session.updatedAt
+                            ? h('span', { style: { fontSize: 11, opacity: 0.5 } }, new Date(session.updatedAt).toLocaleString())
+                            : null)))
                 : null,
               grantFor === peer.deviceId
                 ? h('div', {
@@ -705,6 +764,14 @@ window.__ModuleLoader__.load({
                       }),
                       h('span', null, t.uiAccess)),
                     h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.5 } }, t.uiAccessHint),
+                    h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: peer.sessionAccess === true,
+                        onChange: (event) => toggleSessionAccess(peer, event.target.checked),
+                      }),
+                      h('span', null, t.sessionAccess)),
+                    h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.5 } }, t.sessionAccessHint),
                     localWorkspaces.map((workspace) => h('label', {
                       key: workspace.id,
                       style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 },

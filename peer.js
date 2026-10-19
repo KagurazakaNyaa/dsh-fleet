@@ -184,6 +184,18 @@ export function startPeerServer(options) {
           return
         }
 
+        if (req.method === 'GET' && path === '/sessions') {
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const sessions = typeof options.listSessions === 'function' ? await options.listSessions() : []
+          if (typeof store.touchPeer === 'function') await store.touchPeer(callerId)
+          sendJson(res, 200, { protocol: PROTOCOL, sessions })
+          return
+        }
+
         if (req.method === 'GET' && path === '/workspaces') {
           const callerId = headerValue(req, 'x-fleet-device')
           const peer = await store.getPeer(callerId)
@@ -286,8 +298,7 @@ export async function peerPair(options) {
   return { hello, ack }
 }
 
-export async function peerWorkspaces(options) {
-  const base = normalizePeerAddress(options.address)
+export async function peerWorkspaces(options) {  const base = normalizePeerAddress(options.address)
   const signed = signRequest(options.identity, 'GET', '/workspaces')
   const response = await fetch(`${base}/workspaces`, {
     headers: { ...signed.headers, accept: 'application/json' },
@@ -302,5 +313,23 @@ export async function peerWorkspaces(options) {
   }
   if (!response.ok) throw new Error(`workspaces ${response.status}${data && data.error ? ` ${data.error}` : ''}`)
   return (data && data.workspaces) || []
+}
+
+export async function peerSessions(options) {
+  const base = normalizePeerAddress(options.address)
+  const signed = signRequest(options.identity, 'GET', '/sessions')
+  const response = await fetch(`${base}/sessions`, {
+    headers: { ...signed.headers, accept: 'application/json' },
+    signal: AbortSignal.timeout(options.timeoutMs ?? 5000),
+  })
+  const text = await response.text()
+  let data = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = null
+  }
+  if (!response.ok) throw new Error(`sessions ${response.status}${data && data.error ? ` ${data.error}` : ''}`)
+  return (data && data.sessions) || []
 }
 
