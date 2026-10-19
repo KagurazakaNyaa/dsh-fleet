@@ -29,6 +29,9 @@ const HELP = `dsh-fleet CLI
   workspaces <deviceId>        fetch that peer's granted workspace metadata
   workspaces-local             list this instance's workspaces
   sessions <deviceId>          list that peer's session metadata
+  task <deviceId> <wsId> <text...>
+                               create a session on the peer and submit text
+  task-poll <taskId>           read new events of a submitted task
   session-access <deviceId> [--revoke]
                                allow or revoke a peer's access to this session list
   grant <deviceId> <wsId> [--revoke]
@@ -163,6 +166,19 @@ async function main() {
   if (command === 'sessions') {
     if (!first) throw new Error('sessions requires <deviceId>')
     print(await call(flags, '/peers/sessions', { deviceId: first }), flags)
+    return
+  }
+
+  if (command === 'task') {
+    if (!first || !second || positional.length < 4) throw new Error('task requires <deviceId> <workspaceId> <text>')
+    const text = positional.slice(3).join(' ')
+    print(await call(flags, '/peers/task', { deviceId: first, workspaceId: second, text }), flags)
+    return
+  }
+
+  if (command === 'task-poll') {
+    if (!first) throw new Error('task-poll requires <taskId>')
+    print(await call(flags, '/peers/task/poll', { taskId: first }), flags)
     return
   }
 

@@ -184,8 +184,66 @@ export function startPeerServer(options) {
           return
         }
 
-        if (req.method === 'GET' && path === '/sessions') {
+        if (req.method === 'GET' && path === '/ui-token') {
           const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.uiAccess !== true) throw new PeerError(403, 'ui-access-required')
+          const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          if (typeof options.uiToken !== 'function') throw new PeerError(503, 'ui-token-unavailable')
+          sendJson(res, 200, { protocol: PROTOCOL, url: await options.uiToken() })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/session/create') {
+          const raw = await readRawBody(req)
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, raw, publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'))
+          const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+          if (workspaceId === '') throw new PeerError(400, 'workspace-required')
+          const sessionId = await options.createSession(workspaceId)
+          if (typeof store.touchPeer === 'function') await store.touchPeer(callerId)
+          sendJson(res, 200, { protocol: PROTOCOL, sessionId })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/session/prompt') {
+          const raw = await readRawBody(req)
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, raw, publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'))
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+          const text = typeof body.text === 'string' ? body.text : ''
+          if (sessionId === '' || text === '') throw new PeerError(400, 'session-and-text-required')
+          await options.promptSession(sessionId, text)
+          if (typeof store.touchPeer === 'function') await store.touchPeer(callerId)
+          sendJson(res, 200, { protocol: PROTOCOL, accepted: true })
+          return
+        }
+
+        if (req.method === 'GET' && path === '/session/tail') {
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const requestUrl = new URL(req.url || '/', 'http://localhost')
+          const sessionId = requestUrl.searchParams.get('sessionId') || ''
+          const since = Number(requestUrl.searchParams.get('since') || '0')
+          if (sessionId === '') throw new PeerError(400, 'session-required')
+          const tail = await options.tailSession(sessionId, Number.isFinite(since) ? since : 0)
+          sendJson(res, 200, { protocol: PROTOCOL, ...tail })
+          return
+        }
+
+        if (req.method === 'GET' && path === '/sessions') {          const callerId = headerValue(req, 'x-fleet-device')
           const peer = await store.getPeer(callerId)
           if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
           const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
@@ -331,5 +389,64 @@ export async function peerSessions(options) {
   }
   if (!response.ok) throw new Error(`sessions ${response.status}${data && data.error ? ` ${data.error}` : ''}`)
   return (data && data.sessions) || []
+}
+
+async function signedCall(options) {
+  const base = normalizePeerAddress(options.address)
+  const pathname = String(options.path).split('?')[0]
+  const signed = signRequest(options.identity, options.method, pathname, options.body)
+  const headers = { ...signed.headers, accept: 'application/json' }
+  if (options.body !== undefined) headers['content-type'] = 'application/json'
+  const response = await fetch(`${base}${options.path}`, {
+    method: options.method,
+    headers,
+    body: options.body === undefined ? undefined : signed.body,
+    signal: AbortSignal.timeout(options.timeoutMs ?? 8000),
+  })
+  const text = await response.text()
+  let data = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = null
+  }
+  if (!response.ok) {
+    throw new Error(`${options.path} ${response.status}${data && data.error ? ` ${data.error}` : ''}`)
+  }
+  return data
+}
+
+export async function peerUiToken(options) {
+  const data = await signedCall({ ...options, method: 'GET', path: '/ui-token', timeoutMs: options.timeoutMs ?? 4000 })
+  return (data && data.url) || ''
+}
+
+export async function peerSessionCreate(options) {
+  const data = await signedCall({
+    ...options,
+    method: 'POST',
+    path: '/session/create',
+    body: { workspaceId: options.workspaceId },
+  })
+  return (data && data.sessionId) || ''
+}
+
+export async function peerSessionPrompt(options) {
+  return await signedCall({
+    ...options,
+    method: 'POST',
+    path: '/session/prompt',
+    body: { sessionId: options.sessionId, text: options.text },
+  })
+}
+
+export async function peerSessionTail(options) {
+  const query = new URLSearchParams({ sessionId: options.sessionId, since: String(options.since ?? 0) })
+  return await signedCall({
+    ...options,
+    method: 'GET',
+    path: `/session/tail?${query.toString()}`,
+    timeoutMs: options.timeoutMs ?? 4000,
+  })
 }
 

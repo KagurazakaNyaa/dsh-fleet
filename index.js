@@ -2,7 +2,16 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqu
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { peerPair, peerSessions, peerWorkspaces, startPeerServer } from './peer.js'
+import {
+  peerPair,
+  peerSessionCreate,
+  peerSessionPrompt,
+  peerSessionTail,
+  peerSessions,
+  peerUiToken,
+  peerWorkspaces,
+  startPeerServer,
+} from './peer.js'
 import { connectTunnel, startUiProxy } from './tunnel.js'
 
 export const name = 'dsh-fleet'
@@ -375,8 +384,7 @@ function toPeerIdentity(identity) {
 /**
  * Session metadata only: ids, titles, cwd and running state. Message content
  * never leaves the owner through this call.
- */
-async function listRemoteSessions(ctx) {
+ */async function listRemoteSessions(ctx) {
   const controller = ctx.get('sessionController')
   if (!controller || typeof controller.list !== 'function') return []
   try {
@@ -446,6 +454,77 @@ async function handleRotatePairingCode(req, res) {
   const next = { ...identity, pairingCode: groupHex(randomBytes(12).toString('hex')) }
   await persistIdentity(next)
   sendJson(res, 200, publicIdentity(next))
+}
+
+function messageText(message) {
+  const blocks = message && message.content
+  if (!Array.isArray(blocks)) return ''
+  const parts = []
+  for (const block of blocks) {
+    if (block && block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    else if (block && block.type === 'reasoning' && typeof block.text === 'string') parts.push(`[reasoning] ${block.text}`)
+  }
+  return parts.join('\n').trim()
+}
+
+function sessionFrame(event) {
+  if (!event || typeof event !== 'object') return null
+  const base = { seq: Number(event.seq) || 0, type: String(event.type || '') }
+  if (event.type === 'user/message') return { ...base, role: 'user', text: messageText(event.data) }
+  if (event.type === 'assistant/message') return { ...base, role: 'assistant', text: messageText(event.data && event.data.message) }
+  if (event.type === 'tool/call') return { ...base, role: 'tool', text: String((event.data && event.data.name) || 'tool') }
+  if (event.type === 'tool/result') return { ...base, role: 'tool-result', text: '' }
+  if (event.type === 'turn/end') {
+    const kind = event.data && event.data.reason && event.data.reason.kind
+    return { ...base, role: 'status', text: String(kind || 'end') }
+  }
+  return null
+}
+
+async function tailSessionForPeer(ctx, sessionId, since) {
+  const sessions = ctx.get('sessions')
+  const session = sessions && typeof sessions.get === 'function' ? sessions.get(sessionId) : undefined
+  if (!session) return { frames: [], cursor: since, running: false }
+  const last = Number(session.seq) || 0
+  const from = Number.isFinite(since) && since > 0 ? since : 0
+  const events = session.snapshotEvents(from, last + 1) || []
+  const frames = []
+  for (const event of events) {
+    const frame = sessionFrame(event)
+    if (frame !== null) frames.push(frame)
+  }
+  const agents = ctx.get('agents')
+  const agent = agents && typeof agents.get === 'function' ? agents.get(sessionId) : undefined
+  return { frames, cursor: last + 1, running: Boolean(agent) }
+}
+
+async function createSessionForPeer(ctx, workspaceId) {
+  const controller = ctx.get('sessionController')
+  if (!controller || typeof controller.create !== 'function') throw new Error('session-create-unavailable')
+  const value = await controller.create({ workspaceId })
+  return String(value.sessionId)
+}
+
+async function promptSessionForPeer(ctx, sessionId, text) {
+  const controller = ctx.get('sessionController')
+  if (!controller || typeof controller.prompt !== 'function') throw new Error('session-prompt-unavailable')
+  await controller.prompt({
+    requestId: `fleet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    sessionId,
+    mode: 'queue',
+    content: [{ type: 'text', text }],
+  })
+}
+
+function uiTokenFor(ctx) {
+  const connection = ctx.get('connection')
+  const port = ctx.webServer && ctx.webServer.port
+  if (!connection || typeof connection.authenticatedUrl !== 'function' || !port) return ''
+  try {
+    return connection.authenticatedUrl(`http://127.0.0.1:${port}/`)
+  } catch {
+    return ''
+  }
 }
 
 async function handleState(req, res) {
@@ -635,7 +714,66 @@ async function handlePeerUi(req, res) {
     proxy = await startUiProxy({ host: target.host, port: target.port, identity })
     uiProxies.set(peer.deviceId, proxy)
   }
-  sendJson(res, 200, { url: `http://127.0.0.1:${proxy.port}/`, port: proxy.port })
+  let loginUrl = `http://127.0.0.1:${proxy.port}/`
+  try {
+    const ownerUrl = await peerUiToken({ address: peer.address, identity, timeoutMs: 4000 })
+    const token = ownerUrl === '' ? '' : new URL(ownerUrl).searchParams.get('token')
+    if (token) loginUrl = `${loginUrl}?token=${encodeURIComponent(token)}`
+  } catch {
+    // The plain URL still works when this browser already holds the owner cookie.
+  }
+  sendJson(res, 200, { url: `http://127.0.0.1:${proxy.port}/`, loginUrl, port: proxy.port })
+}
+
+const tasks = new Map()
+
+async function handlePeerTask(req, res) {
+  const body = await readBody(req)
+  const peer = await peerStore.getPeer(String(body.deviceId || ''))
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const workspaceId = cleanText(body.workspaceId, 200)
+  const text = cleanText(body.text, 20_000)
+  if (workspaceId === '' || text === '') {
+    sendJson(res, 400, { message: 'workspace-and-text-required' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  const sessionId = await peerSessionCreate({ address: peer.address, identity, workspaceId })
+  if (sessionId === '') {
+    sendJson(res, 502, { message: 'session-create-empty' })
+    return
+  }
+  await peerSessionPrompt({ address: peer.address, identity, sessionId, text })
+  const taskId = randomUUID()
+  tasks.set(taskId, { deviceId: peer.deviceId, sessionId, cursor: 0, createdAt: Date.now() })
+  sendJson(res, 200, { taskId, sessionId })
+}
+
+async function handleTaskPoll(req, res) {
+  const body = await readBody(req)
+  const task = tasks.get(String(body.taskId || ''))
+  if (!task) {
+    sendJson(res, 404, { message: 'task-not-found' })
+    return
+  }
+  const peer = await peerStore.getPeer(task.deviceId)
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  const tail = await peerSessionTail({ address: peer.address, identity, sessionId: task.sessionId, since: task.cursor })
+  const cursor = Number(tail && tail.cursor)
+  if (Number.isFinite(cursor) && cursor >= task.cursor) task.cursor = cursor
+  sendJson(res, 200, {
+    sessionId: task.sessionId,
+    messages: (tail && tail.frames) || [],
+    running: Boolean(tail && tail.running),
+    cursor: task.cursor,
+  })
 }
 
 async function handlePeerSessions(req, res) {
@@ -726,6 +864,8 @@ export function apply(ctx) {
     ['/peers/ui', 'POST', handlePeerUi],
     ['/peers/session-access', 'POST', handleSessionAccess],
     ['/peers/sessions', 'POST', handlePeerSessions],
+    ['/peers/task', 'POST', handlePeerTask],
+    ['/peers/task/poll', 'POST', handleTaskPoll],
     ['/peers/delete', 'POST', handlePeerDelete],
     ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
@@ -758,6 +898,10 @@ export function apply(ctx) {
         store: peerStore,
         listWorkspaces: () => listLocalWorkspaces(ctx),
         listSessions: () => listRemoteSessions(ctx),
+        uiToken: () => uiTokenFor(ctx),
+        createSession: (workspaceId) => createSessionForPeer(ctx, workspaceId),
+        promptSession: (sessionId, text) => promptSessionForPeer(ctx, sessionId, text),
+        tailSession: (sessionId, since) => tailSessionForPeer(ctx, sessionId, since),
         verifyToken: (candidate) => verifyWebToken(ctx, candidate),
         tunnelTargetPort: Number(ctx.webServer && ctx.webServer.port) || 0,
         name: os.hostname(),

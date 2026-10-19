@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useMemo, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     const COPY = {
       zh: {
@@ -85,6 +85,17 @@ window.__ModuleLoader__.load({
         sessionsBtn: '会话',
         sessionsEmpty: '没有会话',
         sessionsFailed: '获取会话失败',
+        taskBtn: '任务',
+        taskHint: '在属主上新建一个会话并提交这句话；消息在属主执行与保存，这里只显示最近的事件。',
+        taskWorkspace: '工作区',
+        taskPlaceholder: '要在这台机器上做什么…',
+        taskSend: '发送',
+        taskRunning: '运行中',
+        taskIdle: '空闲',
+        taskEmpty: '还没有消息',
+        taskFailed: '任务失败',
+        taskNeeds: '先选工作区并输入内容',
+        openOwnerUi: '打开属主界面',
       },
       en: {
         section: 'DSH Fleet',
@@ -165,6 +176,17 @@ window.__ModuleLoader__.load({
         sessionsBtn: 'Sessions',
         sessionsEmpty: 'No sessions',
         sessionsFailed: 'Failed to fetch sessions',
+        taskBtn: 'Task',
+        taskHint: 'Creates a session on the owner and submits this text there; the run and its log stay on the owner, and only recent events are shown here.',
+        taskWorkspace: 'Workspace',
+        taskPlaceholder: 'What should it do on that machine…',
+        taskSend: 'Send',
+        taskRunning: 'running',
+        taskIdle: 'idle',
+        taskEmpty: 'No messages yet',
+        taskFailed: 'Task failed',
+        taskNeeds: 'Pick a workspace and type something',
+        openOwnerUi: 'Open owner UI',
       },
     }
 
@@ -281,6 +303,12 @@ window.__ModuleLoader__.load({
       const [pairing, setPairing] = useState({ address: '', mode: 'token', credential: '' })
       const [grantFor, setGrantFor] = useState('')
       const [remoteSessions, setRemoteSessions] = useState({})
+      const [tasks, setTasks] = useState({})
+      const [taskPeer, setTaskPeer] = useState({})
+      const [taskFor, setTaskFor] = useState('')
+      const [taskDraft, setTaskDraft] = useState({})
+      const [taskWorkspace, setTaskWorkspace] = useState({})
+      const loginUsed = useRef(new Set())
 
       const probe = useCallback(async (list) => {
         if (!list || list.length === 0) return
@@ -416,8 +444,10 @@ window.__ModuleLoader__.load({
           const data = await api('/api/dsh-fleet/peers/ui', { deviceId: peer.deviceId })
           const url = data && data.url
           if (!url) throw new Error('no-url')
+          const target = loginUsed.current.has(peer.deviceId) ? url : (data.loginUrl || url)
+          loginUsed.current.add(peer.deviceId)
           const link = document.createElement('a')
-          link.href = url
+          link.href = target
           link.target = '_blank'
           link.rel = 'noopener noreferrer'
           document.body.appendChild(link)
@@ -463,6 +493,64 @@ window.__ModuleLoader__.load({
           setError(harnessError.message)
         }
       }, [])
+
+      const pollTask = useCallback(async (taskId) => {
+        try {
+          const data = await api('/api/dsh-fleet/peers/task/poll', { taskId })
+          setTasks((prev) => {
+            const task = prev[taskId]
+            if (!task) return prev
+            const seen = new Set(task.messages.map((message) => `${message.seq}:${message.type}`))
+            const incoming = ((data && data.messages) || []).filter((message) => !seen.has(`${message.seq}:${message.type}`))
+            return {
+              ...prev,
+              [taskId]: {
+                ...task,
+                messages: task.messages.concat(incoming),
+                running: data && data.running === true,
+              },
+            }
+          })
+        } catch {
+          // Transient poll failures retry on the next tick.
+        }
+      }, [])
+
+      const sendTask = useCallback(async (peer) => {
+        const text = String(taskDraft[peer.deviceId] || '').trim()
+        const workspaces = remoteWorkspaces[peer.deviceId] || []
+        const workspaceId = taskWorkspace[peer.deviceId] || (workspaces[0] && workspaces[0].id) || ''
+        if (text === '' || workspaceId === '') {
+          setError(t.taskNeeds)
+          return
+        }
+        setBusy(true)
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/peers/task', { deviceId: peer.deviceId, workspaceId, text })
+          setTasks((prev) => ({
+            ...prev,
+            [data.taskId]: { deviceId: peer.deviceId, sessionId: data.sessionId, messages: [], running: true },
+          }))
+          setTaskPeer((prev) => ({ ...prev, [peer.deviceId]: data.taskId }))
+          setTaskDraft((prev) => ({ ...prev, [peer.deviceId]: '' }))
+        } catch (harnessError) {
+          setError(`${t.taskFailed}: ${harnessError.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [remoteWorkspaces, t, taskDraft, taskWorkspace])
+
+      const activeTaskIds = useMemo(() => Object.keys(tasks).join(','), [tasks])
+
+      useEffect(() => {
+        if (activeTaskIds === '') return undefined
+        const ids = activeTaskIds.split(',')
+        const timer = setInterval(() => {
+          for (const id of ids) void pollTask(id)
+        }, 1500)
+        return () => clearInterval(timer)
+      }, [activeTaskIds, pollTask])
 
       const removePeer = useCallback(async (peer) => {        if (!window.confirm(t.confirmUnpeer)) return
         setError('')
@@ -687,6 +775,8 @@ window.__ModuleLoader__.load({
           ...peers.map((peer) => {
             const granted = Array.isArray(peer.grants) ? peer.grants : []
             const remote = remoteWorkspaces[peer.deviceId]
+            const peerWorkspaces = remote || []
+            const task = tasks[taskPeer[peer.deviceId]]
             return h('div', {
               key: peer.deviceId,
               style: {
@@ -706,6 +796,7 @@ window.__ModuleLoader__.load({
                   h(Button, { onClick: () => openUi(peer) }, t.openUi),
                   h(Button, { onClick: () => refreshWorkspaces(peer) }, t.fetchWorkspaces),
                   h(Button, { onClick: () => fetchSessions(peer) }, t.sessionsBtn),
+                  h(Button, { onClick: () => setTaskFor(taskFor === peer.deviceId ? '' : peer.deviceId) }, t.taskBtn),
                   h(Button, { onClick: () => setGrantFor(grantFor === peer.deviceId ? '' : peer.deviceId) }, t.grantLocal),
                   h(Button, { onClick: () => removePeer(peer) }, t.remove))),
               remote
@@ -744,6 +835,50 @@ window.__ModuleLoader__.load({
                           session.updatedAt
                             ? h('span', { style: { fontSize: 11, opacity: 0.5 } }, new Date(session.updatedAt).toLocaleString())
                             : null)))
+                : null,
+              taskFor === peer.deviceId
+                ? h('div', {
+                    style: {
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
+                      paddingTop: 6,
+                    },
+                  },
+                    h('div', { style: { fontSize: 11.5, opacity: 0.6, lineHeight: 1.5 } }, t.taskHint),
+                    peerWorkspaces.length === 0
+                      ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                          h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.noRemoteWorkspaces),
+                          h(Button, { onClick: () => refreshWorkspaces(peer) }, t.fetchWorkspaces))
+                      : h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                          h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.taskWorkspace),
+                          h('select', {
+                            value: taskWorkspace[peer.deviceId] || peerWorkspaces[0].id,
+                            onChange: (event) => setTaskWorkspace((prev) => ({ ...prev, [peer.deviceId]: event.target.value })),
+                            style: { ...inputStyle, width: 220 },
+                          }, peerWorkspaces.map((workspace) => h('option', { key: workspace.id, value: workspace.id }, workspace.title || workspace.id))),
+                          h(Button, { onClick: () => sendTask(peer), disabled: busy, primary: true }, t.taskSend)),
+                    h('textarea', {
+                      value: taskDraft[peer.deviceId] || '',
+                      rows: 3,
+                      placeholder: t.taskPlaceholder,
+                      onChange: (event) => setTaskDraft((prev) => ({ ...prev, [peer.deviceId]: event.target.value })),
+                      style: { ...inputStyle, resize: 'vertical', fontFamily: 'inherit' },
+                    }),
+                    task
+                      ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+                          h('div', { style: { fontSize: 11.5, opacity: 0.55 } }, `${task.running ? t.taskRunning : t.taskIdle} · ${task.sessionId}`),
+                          task.messages.length === 0
+                            ? h('span', { style: { fontSize: 11.5, opacity: 0.55 } }, t.taskEmpty)
+                            : task.messages.map((message) => h('div', {
+                                key: `${message.seq}:${message.type}`,
+                                style: { fontSize: 12, lineHeight: 1.5 },
+                              },
+                                h('span', { style: { opacity: 0.5, marginRight: 6 } }, message.role),
+                                h('span', null, message.text || ''))),
+                          h('div', null, h(Button, { onClick: () => openUi(peer) }, t.openOwnerUi)))
+                      : null)
                 : null,
               grantFor === peer.deviceId
                 ? h('div', {
