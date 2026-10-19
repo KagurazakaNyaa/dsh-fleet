@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promi
 import os from 'node:os'
 import path from 'node:path'
 import { peerPair, peerWorkspaces, startPeerServer } from './peer.js'
+import { connectTunnel, startUiProxy } from './tunnel.js'
 
 export const name = 'dsh-fleet'
 export const inject = ['webServer']
@@ -325,6 +326,7 @@ const peerStore = {
       ...(previous ?? {}),
       ...record,
       grants: Array.isArray(record.grants) ? record.grants : (previous && Array.isArray(previous.grants) ? previous.grants : []),
+      uiAccess: typeof record.uiAccess === 'boolean' ? record.uiAccess : Boolean(previous && previous.uiAccess),
       pairedAt: (previous && previous.pairedAt) || record.pairedAt || Date.now(),
     }
     if (index === -1) state.peers.push(next)
@@ -556,8 +558,63 @@ async function handleGrant(req, res) {
   sendJson(res, 200, { peer: next })
 }
 
-async function handlePeerDelete(req, res) {
+const uiProxies = new Map()
+
+function splitAddress(address) {
+  const value = String(address ?? '').trim()
+  const index = value.lastIndexOf(':')
+  if (index <= 0) return null
+  const host = value.slice(0, index)
+  const port = Number(value.slice(index + 1))
+  if (host === '' || !Number.isInteger(port) || port <= 0 || port > 65_535) return null
+  return { host, port }
+}
+
+async function handleUiAccess(req, res) {
   const body = await readBody(req)
+  const peer = await peerStore.getPeer(String(body.deviceId || ''))
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const next = await peerStore.upsertPeer({ ...peer, uiAccess: body.allow === true })
+  sendJson(res, 200, { peer: next })
+}
+
+async function handlePeerUi(req, res) {
+  const body = await readBody(req)
+  const peer = await peerStore.getPeer(String(body.deviceId || ''))
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const target = splitAddress(peer.address)
+  if (target === null) {
+    sendJson(res, 409, { message: 'peer-has-no-address' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  let proxy = uiProxies.get(peer.deviceId)
+  if (!proxy) {
+    try {
+      const probe = await connectTunnel({ host: target.host, port: target.port, identity, timeoutMs: 3000 })
+      probe.close()
+    } catch (error) {
+      const message = String((error && error.message) || error)
+      if (message.includes('403')) {
+        sendJson(res, 403, { message: 'ui-access-not-granted' })
+        return
+      }
+      sendJson(res, 502, { message: `tunnel-unavailable: ${message}` })
+      return
+    }
+    proxy = await startUiProxy({ host: target.host, port: target.port, identity })
+    uiProxies.set(peer.deviceId, proxy)
+  }
+  sendJson(res, 200, { url: `http://127.0.0.1:${proxy.port}/`, port: proxy.port })
+}
+
+async function handlePeerDelete(req, res) {  const body = await readBody(req)
   const deviceId = String(body.deviceId || '')
   const state = await loadPeers()
   const next = state.peers.filter((item) => item.deviceId !== deviceId)
@@ -566,6 +623,15 @@ async function handlePeerDelete(req, res) {
     return
   }
   await savePeers(next)
+  const proxy = uiProxies.get(deviceId)
+  if (proxy) {
+    uiProxies.delete(deviceId)
+    try {
+      proxy.server.close()
+    } catch {
+      // already closed
+    }
+  }
   sendJson(res, 200, { peers: next })
 }
 
@@ -603,6 +669,8 @@ export function apply(ctx) {
     ['/pair', 'POST', handlePair],
     ['/peers/workspaces', 'POST', handlePeerWorkspaces],
     ['/peers/grant', 'POST', handleGrant],
+    ['/peers/ui-access', 'POST', handleUiAccess],
+    ['/peers/ui', 'POST', handlePeerUi],
     ['/peers/delete', 'POST', handlePeerDelete],
     ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
@@ -635,6 +703,7 @@ export function apply(ctx) {
         store: peerStore,
         listWorkspaces: () => listLocalWorkspaces(ctx),
         verifyToken: (candidate) => verifyWebToken(ctx, candidate),
+        tunnelTargetPort: Number(ctx.webServer && ctx.webServer.port) || 0,
         name: os.hostname(),
         host: runtime.peerHost,
         port: peerListenPort(),
@@ -655,6 +724,14 @@ export function apply(ctx) {
     return () => {
       disposed = true
       if (peerServer !== null) void peerServer.close()
+      for (const proxy of uiProxies.values()) {
+        try {
+          proxy.server.close()
+        } catch {
+          // already closed
+        }
+      }
+      uiProxies.clear()
       void unlink(runtimeFile()).catch(() => {})
     }
   }, 'dsh-fleet: peer listener')

@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, sign, verify } from 'node:crypto'
 import http from 'node:http'
+import { attachTunnel } from './tunnel.js'
 
 export const PROTOCOL = 1
 export const MAX_BODY_BYTES = 256 * 1024
@@ -211,10 +212,22 @@ export function startPeerServer(options) {
     })()
   })
 
+  if (typeof options.tunnelTargetPort === 'number' && options.tunnelTargetPort > 0) {
+    attachTunnel(server, {
+      targetPort: options.tunnelTargetPort,
+      authorize: async (request) => {
+        const deviceId = headerValue(request, 'x-fleet-device')
+        const peer = await store.getPeer(deviceId)
+        if (!peer || peer.uiAccess !== true) return null
+        const verified = verifySignature(request, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+        return verified === peer.deviceId ? peer : null
+      },
+    })
+  }
+
   return {
     server,
-    start() {
-      return new Promise((resolve, reject) => {
+    start() {      return new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, host, () => {
           const address = server.address()

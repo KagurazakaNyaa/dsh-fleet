@@ -4,7 +4,7 @@ Peer-to-peer control plane for [DeepSeek Harness](https://github.com/deepseek-ai
 
 多个 DSH 实例互相配对，共享**工作区引用**与在线状态；数据从不复制——会话、文件、模型凭据、插件配置永远留在属主实例上。
 
-> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 授权）与无头 CLI 已可用；P2 属主 UI 代理待做。
+> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 授权）、**属主 UI 回环代理**与无头 CLI 已可用；P3 会话流待做。
 
 ## 设计边界
 
@@ -48,6 +48,7 @@ peer 监听默认 `127.0.0.1:3071`，只承载控制面消息。
 | GET | `/hello` | 返回 `protocol`、`deviceId`、`name`、公钥（未签名） |
 | POST | `/pair` | 携带对端配对码 **或** `dsh web` 启动时打印的 token + Ed25519 签名；成功后双向固定公钥 |
 | GET | `/workspaces` | 签名请求；只返回属主已授权的工作区**元数据** |
+| GET | `/tunnel`（Upgrade） | 签名升级后进入字节隧道；每个流被转发到属主 `127.0.0.1:<web 端口>`，需属主开启 `uiAccess` |
 
 - 每次请求签名 `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`，时间窗 ±60s，nonce 去重防重放。
 - 工作区默认不授权；属主在本地勾选后才出现在 `workspaces` 结果里。
@@ -134,6 +135,8 @@ dsh plugin --profile web add ./dsh-fleet
 | POST | `/api/dsh-fleet/peers/workspaces` | 拉取某 peer 已授权的工作区元数据 |
 | POST | `/api/dsh-fleet/peers/grant` | 授权/撤销某个 peer 访问本机工作区 |
 | POST | `/api/dsh-fleet/peers/delete` | 删除 peer 记录 |
+| POST | `/api/dsh-fleet/peers/ui-access` | 允许/撤销该 peer 访问**本机**界面 |
+| POST | `/api/dsh-fleet/peers/ui` | 取该 peer 的界面代理地址（首次建立本机回环端口） |
 | GET | `/api/dsh-fleet/workspaces` | 本机工作区列表（供授权选择） |
 
 全部同源校验；私钥不出主机进程。
@@ -141,7 +144,7 @@ dsh plugin --profile web add ./dsh-fleet
 ## 路线图
 
 1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验、设置页 peer 面板 —— 已完成。
-2. **P2 呈现**：属主 UI 代理（反代 + `authenticatedUrl`，不落盘），点远程工作区直接打开属主界面。
+2. **P2 呈现**：属主 UI 回环代理（隧道 + `uiAccess` 授权，数据只透传）—— 已完成；点「界面」即在本机端口打开属主 DSH。
 3. **P3 会话流**：在属主建会话、订阅事件、回传输入与审批，本地只渲染。
 4. **P4 网络**：局域网发现、中继、跨网。
 
@@ -150,6 +153,7 @@ dsh plugin --profile web add ./dsh-fleet
 - 配对码泄露等同于“可以被首次配对”，轮换即可；设备公钥固定后，配对码不再参与认证。
 - 实例令牌以明文保存在本机 `$DSH_HOME/dsh-fleet/instances.json`，不会发送给模型。
 - peer 通道默认只监听回环；打开局域网绑定前请确认网络可信，跨公网请置于 WireGuard/Tailscale 之后。
+- `uiAccess` 默认关闭；开启等于把本机 DSH 界面（进而 shell）交给该 peer，只对可信设备开启。
 
 ## License
 

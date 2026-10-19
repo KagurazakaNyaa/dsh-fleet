@@ -75,6 +75,11 @@ window.__ModuleLoader__.load({
         inboundPeer: '由对方发起',
         confirmUnpeer: '删除这个 peer 记录？不会影响对方。',
         unpaired: '已删除 peer',
+        openUi: '界面',
+        openUiFailed: '打开界面失败',
+        uiAccessDenied: '对方还没有授予界面访问权限',
+        uiAccess: '允许访问界面',
+        uiAccessHint: '开启后，对方可以把本机 DSH 界面代理到它自己的回环端口；等价于远程操作这台机器。关闭后新连接会被拒绝。',
       },
       en: {
         section: 'DSH Fleet',
@@ -145,6 +150,11 @@ window.__ModuleLoader__.load({
         inboundPeer: 'inbound',
         confirmUnpeer: 'Remove this peer record? The other side is unaffected.',
         unpaired: 'Peer removed',
+        openUi: 'UI',
+        openUiFailed: 'Failed to open the UI',
+        uiAccessDenied: 'The peer has not granted UI access',
+        uiAccess: 'Allow UI access',
+        uiAccessHint: 'When enabled, this peer can proxy this DSH web UI onto its own loopback port — effectively remote control of this machine. Disabling rejects new connections.',
       },
     }
 
@@ -389,8 +399,40 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      const removePeer = useCallback(async (peer) => {
-        if (!window.confirm(t.confirmUnpeer)) return
+      const openUi = useCallback(async (peer) => {
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/peers/ui', { deviceId: peer.deviceId })
+          const url = data && data.url
+          if (!url) throw new Error('no-url')
+          const link = document.createElement('a')
+          link.href = url
+          link.target = '_blank'
+          link.rel = 'noopener noreferrer'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setNotice(url)
+        } catch (harnessError) {
+          setError(harnessError.message === 'ui-access-not-granted'
+            ? t.uiAccessDenied
+            : `${t.openUiFailed}: ${harnessError.message}`)
+        }
+      }, [t])
+
+      const toggleUiAccess = useCallback(async (peer, allow) => {
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/peers/ui-access', { deviceId: peer.deviceId, allow })
+          if (data && data.peer) {
+            setPeers((prev) => prev.map((item) => (item.deviceId === peer.deviceId ? data.peer : item)))
+          }
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [])
+
+      const removePeer = useCallback(async (peer) => {        if (!window.confirm(t.confirmUnpeer)) return
         setError('')
         try {
           const data = await api('/api/dsh-fleet/peers/delete', { deviceId: peer.deviceId })
@@ -629,6 +671,7 @@ window.__ModuleLoader__.load({
                 h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11.5, opacity: 0.7 } }, peer.deviceId),
                 h('span', { style: { fontSize: 11.5, opacity: 0.55 } }, peer.address || t.inboundPeer),
                 h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6 } },
+                  h(Button, { onClick: () => openUi(peer) }, t.openUi),
                   h(Button, { onClick: () => refreshWorkspaces(peer) }, t.fetchWorkspaces),
                   h(Button, { onClick: () => setGrantFor(grantFor === peer.deviceId ? '' : peer.deviceId) }, t.grantLocal),
                   h(Button, { onClick: () => removePeer(peer) }, t.remove))),
@@ -654,6 +697,14 @@ window.__ModuleLoader__.load({
                     },
                   },
                     h('div', { style: { fontSize: 11.5, opacity: 0.6 } }, t.grantHint),
+                    h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: peer.uiAccess === true,
+                        onChange: (event) => toggleUiAccess(peer, event.target.checked),
+                      }),
+                      h('span', null, t.uiAccess)),
+                    h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.5 } }, t.uiAccessHint),
                     localWorkspaces.map((workspace) => h('label', {
                       key: workspace.id,
                       style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 },
