@@ -17,6 +17,7 @@
   },
   "files": [
     "index.js",
+    "peer.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",

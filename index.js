@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:c
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { peerPair, peerWorkspaces, startPeerServer } from './peer.js'
 
 export const name = 'dsh-fleet'
 export const inject = ['webServer']
@@ -21,6 +22,16 @@ function stateFile() {
 
 function identityFile() {
   return path.join(dshHome(), 'dsh-fleet', 'identity.json')
+}
+
+function peersFile() {
+  return path.join(dshHome(), 'dsh-fleet', 'peers.json')
+}
+
+const runtime = {
+  peerPort: 0,
+  peerHost: '127.0.0.1',
+  peerError: '',
 }
 
 function groupHex(hex, size = 4) {
@@ -238,6 +249,77 @@ async function persistIdentity(identity) {
   return identity
 }
 
+async function loadPeers() {
+  try {
+    const parsed = JSON.parse(await readFile(peersFile(), 'utf8'))
+    if (!parsed || !Array.isArray(parsed.peers)) return { version: 1, peers: [] }
+    return { version: 1, peers: parsed.peers.filter((item) => item && typeof item.deviceId === 'string') }
+  } catch {
+    return { version: 1, peers: [] }
+  }
+}
+
+async function savePeers(peers) {
+  const file = peersFile()
+  await mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  await writeFile(tmp, `${JSON.stringify({ version: 1, peers }, null, 2)}\n`, 'utf8')
+  await rename(tmp, file)
+}
+
+const peerStore = {
+  async upsertPeer(record) {
+    const state = await loadPeers()
+    const index = state.peers.findIndex((item) => item.deviceId === record.deviceId)
+    const previous = index === -1 ? null : state.peers[index]
+    const next = {
+      ...(previous ?? {}),
+      ...record,
+      grants: Array.isArray(record.grants) ? record.grants : (previous && Array.isArray(previous.grants) ? previous.grants : []),
+      pairedAt: (previous && previous.pairedAt) || record.pairedAt || Date.now(),
+    }
+    if (index === -1) state.peers.push(next)
+    else state.peers[index] = next
+    await savePeers(state.peers)
+    return next
+  },
+  async getPeer(deviceId) {
+    const state = await loadPeers()
+    return state.peers.find((item) => item.deviceId === deviceId)
+  },
+  async touchPeer(deviceId) {
+    const state = await loadPeers()
+    const peer = state.peers.find((item) => item.deviceId === deviceId)
+    if (!peer) return
+    peer.lastSeenAt = Date.now()
+    await savePeers(state.peers)
+  },
+}
+
+function listLocalWorkspaces(ctx) {
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry || typeof registry.list !== 'function') return []
+  try {
+    return registry.list().map((workspace) => ({
+      id: workspace.id,
+      title: workspace.title,
+      path: workspace.path,
+      status: 'ok',
+    }))
+  } catch {
+    return []
+  }
+}
+
+function toPeerIdentity(identity) {
+  return {
+    deviceId: identity.deviceId,
+    publicPem: identity.publicKey,
+    privatePem: identity.privateKey,
+    pairingCode: identity.pairingCode,
+  }
+}
+
 function publicIdentity(identity) {
   return {
     deviceId: identity.deviceId,
@@ -249,7 +331,11 @@ function publicIdentity(identity) {
 
 async function handleIdentity(req, res) {
   const identity = await loadIdentity()
-  sendJson(res, 200, publicIdentity(identity))
+  sendJson(res, 200, {
+    ...publicIdentity(identity),
+    name: os.hostname(),
+    listener: { host: runtime.peerHost, port: runtime.peerPort, error: runtime.peerError },
+  })
 }
 
 async function handleRotatePairingCode(req, res) {
@@ -326,6 +412,89 @@ async function handleLaunch(req, res) {
   sendJson(res, 200, { url: withToken(instance) })
 }
 
+async function handlePeers(req, res) {
+  const state = await loadPeers()
+  sendJson(res, 200, {
+    peers: state.peers,
+    listener: { host: runtime.peerHost, port: runtime.peerPort, error: runtime.peerError },
+  })
+}
+
+async function handlePair(req, res) {
+  const body = await readBody(req)
+  const address = cleanText(body.address, 255)
+  const code = cleanText(body.code, 128)
+  if (address === '' || code === '') {
+    sendJson(res, 400, { message: 'address-and-code-required' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  const { hello } = await peerPair({ address, code, identity, name: os.hostname() })
+  const peer = await peerStore.upsertPeer({
+    deviceId: hello.deviceId,
+    publicKey: hello.publicKey,
+    name: hello.name || hello.deviceId,
+    address,
+    lastSeenAt: Date.now(),
+  })
+  sendJson(res, 200, { peer })
+}
+
+async function handlePeerWorkspaces(req, res) {
+  const body = await readBody(req)
+  const deviceId = String(body.deviceId || '')
+  const peer = await peerStore.getPeer(deviceId)
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  if (!peer.address) {
+    sendJson(res, 409, { message: 'peer-has-no-address' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  const workspaces = await peerWorkspaces({ address: peer.address, identity })
+  await peerStore.touchPeer(deviceId)
+  sendJson(res, 200, { workspaces })
+}
+
+async function handleGrant(req, res) {
+  const body = await readBody(req)
+  const deviceId = String(body.deviceId || '')
+  const peer = await peerStore.getPeer(deviceId)
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const workspaceId = cleanText(body.workspaceId, 200)
+  if (workspaceId === '') {
+    sendJson(res, 400, { message: 'workspace-required' })
+    return
+  }
+  const grants = new Set(Array.isArray(peer.grants) ? peer.grants : [])
+  if (body.allow === true) grants.add(workspaceId)
+  else grants.delete(workspaceId)
+  const next = await peerStore.upsertPeer({ ...peer, grants: [...grants] })
+  sendJson(res, 200, { peer: next })
+}
+
+async function handlePeerDelete(req, res) {
+  const body = await readBody(req)
+  const deviceId = String(body.deviceId || '')
+  const state = await loadPeers()
+  const next = state.peers.filter((item) => item.deviceId !== deviceId)
+  if (next.length === state.peers.length) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  await savePeers(next)
+  sendJson(res, 200, { peers: next })
+}
+
+async function handleLocalWorkspaces(ctx, req, res) {
+  sendJson(res, 200, { workspaces: listLocalWorkspaces(ctx) })
+}
+
 function guard(handler) {
   return (req, res) => {
     void (async () => {
@@ -352,6 +521,12 @@ export function apply(ctx) {
     ['/delete', 'POST', handleDelete],
     ['/probe', 'POST', handleProbe],
     ['/launch', 'POST', handleLaunch],
+    ['/peers', 'GET', handlePeers],
+    ['/pair', 'POST', handlePair],
+    ['/peers/workspaces', 'POST', handlePeerWorkspaces],
+    ['/peers/grant', 'POST', handleGrant],
+    ['/peers/delete', 'POST', handlePeerDelete],
+    ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
 
   for (const [suffix, method, handler] of routes) {
@@ -371,4 +546,35 @@ export function apply(ctx) {
       },
     }), `dsh-fleet: ${method} ${route}`)
   }
+
+  ctx.effect(() => {
+    let peerServer = null
+    let disposed = false
+    void loadIdentity().then(async (identity) => {
+      if (disposed) return
+      peerServer = startPeerServer({
+        identity: toPeerIdentity(identity),
+        store: peerStore,
+        listWorkspaces: () => listLocalWorkspaces(ctx),
+        name: os.hostname(),
+        host: runtime.peerHost,
+        port: 3071,
+      })
+      try {
+        const info = await peerServer.start()
+        runtime.peerPort = info.port
+        runtime.peerError = ''
+      } catch (error) {
+        runtime.peerError = String((error && error.message) || error)
+        console.warn(`[dsh-fleet] peer listener unavailable: ${runtime.peerError}`)
+      }
+    }).catch((error) => {
+      runtime.peerError = String((error && error.message) || error)
+      console.warn(`[dsh-fleet] identity unavailable: ${runtime.peerError}`)
+    })
+    return () => {
+      disposed = true
+      if (peerServer !== null) void peerServer.close()
+    }
+  }, 'dsh-fleet: peer listener')
 }

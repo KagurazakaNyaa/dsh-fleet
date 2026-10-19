@@ -4,7 +4,7 @@ Peer-to-peer control plane for [DeepSeek Harness](https://github.com/deepseek-ai
 
 多个 DSH 实例互相配对，共享**工作区引用**与在线状态；数据从不复制——会话、文件、模型凭据、插件配置永远留在属主实例上。
 
-> 状态：v0.1。已完成设备身份、配对码、实例登记、探活与打开；peer 通道（`hello` / `workspaces.list` / 签名校验）正在实现。
+> 状态：v0.1。设备身份、配对码、实例登记、探活与打开已可用；peer 通道（`hello` / `pair` / `workspaces`，Ed25519 逐请求签名）已实现并通过单元与集成测试，设置页的 peer UI 待接入。
 
 ## 设计边界
 
@@ -39,6 +39,25 @@ PGP 式“介绍人签名”只会作为便利层（省去手抄指纹），不�
 - 打开：按令牌拼出登录链接，在新标签页打开对应实例。
 - 设置页：「设置 → DSH 集群」。
 
+## Peer 协议（v1）
+
+peer 监听默认 `127.0.0.1:3071`，只承载控制面消息。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/hello` | 返回 `protocol`、`deviceId`、`name`、公钥（未签名） |
+| POST | `/pair` | 携带对端配对码 + Ed25519 签名；成功后双向固定公钥 |
+| GET | `/workspaces` | 签名请求；只返回属主已授权的工作区**元数据** |
+
+- 每次请求签名 `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`，时间窗 ±60s，nonce 去重防重放。
+- 工作区默认不授权；属主在本地勾选后才出现在 `workspaces` 结果里。
+- 协议实现见 `peer.js`，自检见 `scripts/peer-smoke.mjs` 与 `scripts/integration-pair.mjs`。
+
+```bash
+node scripts/peer-smoke.mjs          # 两个内存实例互测：配对、授权、重放、坏签名
+node scripts/integration-pair.mjs    # 用一个假 peer 验证正在运行的插件
+```
+
 ## 安装
 
 ```bash
@@ -65,12 +84,18 @@ dsh plugin --profile web add ./dsh-fleet
 | POST | `/api/dsh-fleet/delete` | 删除实例 |
 | POST | `/api/dsh-fleet/probe` | 探活（单条或全部） |
 | POST | `/api/dsh-fleet/launch` | 取带令牌的登录链接 |
+| GET | `/api/dsh-fleet/peers` | 已配对 peer + 本机监听状态 |
+| POST | `/api/dsh-fleet/pair` | 用地址 + 配对码发起配对 |
+| POST | `/api/dsh-fleet/peers/workspaces` | 拉取某 peer 已授权的工作区元数据 |
+| POST | `/api/dsh-fleet/peers/grant` | 授权/撤销某个 peer 访问本机工作区 |
+| POST | `/api/dsh-fleet/peers/delete` | 删除 peer 记录 |
+| GET | `/api/dsh-fleet/workspaces` | 本机工作区列表（供授权选择） |
 
 全部同源校验；私钥不出主机进程。
 
 ## 路线图
 
-1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`workspaces.list`、签名校验、指纹固定。
+1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验 —— 协议已完成，设置页 peer UI 待接入。
 2. **P2 呈现**：属主 UI 代理（反代 + `authenticatedUrl`，不落盘），点远程工作区直接打开属主界面。
 3. **P3 会话流**：在属主建会话、订阅事件、回传输入与审批，本地只渲染。
 4. **P4 网络**：局域网发现、中继、跨网。
