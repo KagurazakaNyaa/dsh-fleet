@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Peer-to-peer control plane for DeepSeek Harness: pair DSH instances, share workspace references, keep every byte of data where it already lives.",
   "license": "MIT",
+  "bin": {
+    "dsh-fleet": "./bin/dsh-fleet.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/KagurazakaNyaa/dsh-fleet.git"
@@ -19,6 +22,7 @@
     "index.js",
     "peer.js",
     "client.js",
+    "bin/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

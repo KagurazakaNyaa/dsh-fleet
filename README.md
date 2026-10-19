@@ -46,16 +46,49 @@ peer 监听默认 `127.0.0.1:3071`，只承载控制面消息。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/hello` | 返回 `protocol`、`deviceId`、`name`、公钥（未签名） |
-| POST | `/pair` | 携带对端配对码 + Ed25519 签名；成功后双向固定公钥 |
+| POST | `/pair` | 携带对端配对码 **或** `dsh web` 启动时打印的 token + Ed25519 签名；成功后双向固定公钥 |
 | GET | `/workspaces` | 签名请求；只返回属主已授权的工作区**元数据** |
 
 - 每次请求签名 `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`，时间窗 ±60s，nonce 去重防重放。
 - 工作区默认不授权；属主在本地勾选后才出现在 `workspaces` 结果里。
 - 协议实现见 `peer.js`，自检见 `scripts/peer-smoke.mjs` 与 `scripts/integration-pair.mjs`。
 
+### 两种 bootstrap 凭据
+
+| 凭据 | 从哪来 | 适合 |
+|---|---|---|
+| 配对码 | 本插件设置页生成，可轮换 | 有 UI 的场景 |
+| **启动 token** | `dsh web` 启动后打印的 `?token=…` | **无头 / 纯终端**：没有浏览器也能配对 |
+
+属主进程用 `connection.authenticatedUrl()` 读取自己当前进程的 token（不落盘、不写日志），收到 `x-fleet-token` 后用 `timingSafeEqual` 比对；两者都只是 bootstrap，配对完成后长期认证一律走 Ed25519 签名。
+
+## 无头模式（CLI）
+
+不需要浏览器，直接对正在运行的插件发指令：
+
+```bash
+# 看本机设备 ID 与监听状态
+dsh-fleet identity --local http://127.0.0.1:3080
+
+# 用对端 dsh web 打印的 token 配对（适合一台机器只有终端）
+dsh-fleet pair 192.168.3.245:3071 --token '<启动时打印的 token>' --local http://127.0.0.1:3080
+
+# 或者用配对码
+dsh-fleet pair 127.0.0.1:3071 --code ABCD-EF01-... --local http://127.0.0.1:3080
+
+# 查 peer、拉对端工作区、授权本机工作区
+dsh-fleet peers --local http://127.0.0.1:3080
+dsh-fleet workspaces <deviceId> --local http://127.0.0.1:3080
+dsh-fleet grant <deviceId> <workspaceId> --local http://127.0.0.1:3080
+```
+
+`--local` 可省略，默认 `http://127.0.0.1:3080`，也可用 `DSH_WEB_URL` 环境变量。
+
 ```bash
 node scripts/peer-smoke.mjs          # 两个内存实例互测：配对、授权、重放、坏签名
+node scripts/token-pair.mjs          # token 配对、错 token、缺凭据
 node scripts/integration-pair.mjs    # 用一个假 peer 验证正在运行的插件
+node scripts/host-token.mjs          # 真实主机代码读取自身 token 并完成配对
 ```
 
 ## 安装

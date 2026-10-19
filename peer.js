@@ -50,6 +50,7 @@ export function signRequest(identity, method, path, body, options = {}) {
     'x-fleet-signature': signature,
   }
   if (options.code) headers['x-fleet-code'] = options.code
+  if (options.token) headers['x-fleet-token'] = options.token
   if (options.publicKey) headers['x-fleet-public-key'] = options.publicKey
   return { headers, body: raw }
 }
@@ -139,9 +140,18 @@ export function startPeerServer(options) {
         if (req.method === 'POST' && path === '/pair') {
           const raw = await readRawBody(req)
           const code = headerValue(req, 'x-fleet-code')
-          if (!code || code !== identity.pairingCode) {
-            throw new PeerError(403, 'bad-pairing-code')
+          const token = headerValue(req, 'x-fleet-token')
+          let bootstrapOk = false
+          if (code !== '') {
+            bootstrapOk = code === identity.pairingCode
+            if (!bootstrapOk) throw new PeerError(403, 'bad-pairing-code')
+          } else if (token !== '' && typeof options.verifyToken === 'function') {
+            bootstrapOk = await options.verifyToken(token)
+            if (!bootstrapOk) throw new PeerError(403, 'bad-token')
+          } else {
+            throw new PeerError(403, 'missing-bootstrap-credential')
           }
+          void bootstrapOk
           const callerKey = publicKeyFromDerBase64(headerValue(req, 'x-fleet-public-key'))
           const callerId = deviceIdFromDer(callerKey.export({ type: 'spki', format: 'der' }))
           const signedBy = verifySignature(req, raw, callerKey, seenNonces)
@@ -243,6 +253,7 @@ export async function peerPair(options) {
   const body = { name: options.name ?? '' }
   const signed = signRequest(options.identity, 'POST', '/pair', body, {
     code: options.code,
+    token: options.token,
     publicKey: publicKeyDerBase64(options.identity.publicPem),
   })
   const response = await fetch(`${base}/pair`, {

@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -32,6 +32,11 @@ const runtime = {
   peerPort: 0,
   peerHost: '127.0.0.1',
   peerError: '',
+}
+
+function peerListenPort() {
+  const configured = Number(process.env.DSH_FLEET_PORT)
+  return Number.isInteger(configured) && configured > 0 && configured < 65_536 ? configured : 3071
 }
 
 function groupHex(hex, size = 4) {
@@ -320,6 +325,32 @@ function toPeerIdentity(identity) {
   }
 }
 
+/**
+ * The token `dsh web` prints at startup, read from the live connection service
+ * instead of any on-disk copy. Used as an alternative bootstrap credential.
+ */
+function ownWebToken(ctx) {
+  try {
+    const connection = ctx.get('connection')
+    if (!connection || typeof connection.authenticatedUrl !== 'function') return ''
+    const port = ctx.webServer && ctx.webServer.port
+    const url = new URL(connection.authenticatedUrl(`http://127.0.0.1:${port}/`))
+    return url.searchParams.get('token') || ''
+  } catch {
+    return ''
+  }
+}
+
+function verifyWebToken(ctx, candidate) {
+  const expected = ownWebToken(ctx)
+  if (!expected || candidate.length !== expected.length) return false
+  try {
+    return timingSafeEqual(Buffer.from(candidate), Buffer.from(expected))
+  } catch {
+    return false
+  }
+}
+
 function publicIdentity(identity) {
   return {
     deviceId: identity.deviceId,
@@ -329,11 +360,12 @@ function publicIdentity(identity) {
   }
 }
 
-async function handleIdentity(req, res) {
+async function handleIdentity(ctx, req, res) {
   const identity = await loadIdentity()
   sendJson(res, 200, {
     ...publicIdentity(identity),
     name: os.hostname(),
+    tokenAvailable: ownWebToken(ctx) !== '',
     listener: { host: runtime.peerHost, port: runtime.peerPort, error: runtime.peerError },
   })
 }
@@ -424,12 +456,13 @@ async function handlePair(req, res) {
   const body = await readBody(req)
   const address = cleanText(body.address, 255)
   const code = cleanText(body.code, 128)
-  if (address === '' || code === '') {
-    sendJson(res, 400, { message: 'address-and-code-required' })
+  const token = cleanText(body.token, 1024)
+  if (address === '' || (code === '' && token === '')) {
+    sendJson(res, 400, { message: 'address-and-credential-required' })
     return
   }
   const identity = toPeerIdentity(await loadIdentity())
-  const { hello } = await peerPair({ address, code, identity, name: os.hostname() })
+  const { hello } = await peerPair({ address, code: code || undefined, token: token || undefined, identity, name: os.hostname() })
   const peer = await peerStore.upsertPeer({
     deviceId: hello.deviceId,
     publicKey: hello.publicKey,
@@ -515,7 +548,7 @@ function guard(handler) {
 export function apply(ctx) {
   const routes = [
     ['/state', 'GET', handleState],
-    ['/identity', 'GET', handleIdentity],
+    ['/identity', 'GET', (req, res) => handleIdentity(ctx, req, res)],
     ['/identity/rotate', 'POST', handleRotatePairingCode],
     ['/save', 'POST', handleSave],
     ['/delete', 'POST', handleDelete],
@@ -556,9 +589,10 @@ export function apply(ctx) {
         identity: toPeerIdentity(identity),
         store: peerStore,
         listWorkspaces: () => listLocalWorkspaces(ctx),
+        verifyToken: (candidate) => verifyWebToken(ctx, candidate),
         name: os.hostname(),
         host: runtime.peerHost,
-        port: 3071,
+        port: peerListenPort(),
       })
       try {
         const info = await peerServer.start()
