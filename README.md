@@ -84,6 +84,18 @@ dsh-fleet grant <deviceId> <workspaceId> --local http://127.0.0.1:3080
 
 `--local` 可省略，默认 `http://127.0.0.1:3080`，也可用 `DSH_WEB_URL` 环境变量。
 
+## DeepSeek Desktop
+
+Desktop 与 `dsh web` 有三点差异，插件都已处理：
+
+| 差异 | 处理 |
+|---|---|
+| Web 端口每次启动都随机 | 插件把实时地址写入 `$DSH_HOME/dsh-fleet/runtime.json`；CLI 不传 `--local` 也能找到 |
+| 没有终端输出启动 token | 配对默认用设置页的配对码；token 只在有终端（`dsh web --no-open`）时可用 |
+| 新窗口可能被 Electron 拦截 | 每个实例提供「复制链接」，拿带 token 的地址粘到浏览器即可 |
+
+「本机身份」里直接显示 **Web 地址** 与 **Peer 地址**，都可一键复制；Peer 监听默认 `127.0.0.1`，需要局域网时设 `DSH_FLEET_HOST=0.0.0.0`（并自行确认网络可信），端口用 `DSH_FLEET_PORT` 覆盖。
+
 ```bash
 node scripts/peer-smoke.mjs          # 两个内存实例互测：配对、授权、重放、坏签名
 node scripts/token-pair.mjs          # token 配对、错 token、缺凭据

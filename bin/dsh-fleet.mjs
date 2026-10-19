@@ -16,6 +16,10 @@
  * or $DSH_WEB_URL).
  */
 
+import { readFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 const HELP = `dsh-fleet CLI
 
   identity                     show this device's id, pairing code and peer listener
@@ -29,7 +33,10 @@ const HELP = `dsh-fleet CLI
   unpeer <deviceId>            forget a peer
 
 Options:
-  --local <url>                local DSH web origin (default $DSH_WEB_URL or http://127.0.0.1:3080)
+  --local <url>                local DSH web origin; defaults to $DSH_WEB_URL, then
+                               $DSH_HOME/dsh-fleet/runtime.json (written by the plugin,
+                               so DeepSeek Desktop's random port is found automatically),
+                               then http://127.0.0.1:3080
   --json                       raw JSON output
 `
 
@@ -58,12 +65,27 @@ function parseArguments(argv) {
   return { positional, flags }
 }
 
-function localBase(flags) {
-  return String(flags.local || process.env.DSH_WEB_URL || 'http://127.0.0.1:3080').replace(/\/+$/, '')
+function normalizeBase(value) {
+  return String(value).replace(/\/+$/, '')
+}
+
+async function resolveLocal(flags) {
+  if (typeof flags.local === 'string' && flags.local !== '') return normalizeBase(flags.local)
+  if (process.env.DSH_WEB_URL) return normalizeBase(process.env.DSH_WEB_URL)
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+  try {
+    const runtime = JSON.parse(await readFile(path.join(home, 'dsh-fleet', 'runtime.json'), 'utf8'))
+    if (runtime && typeof runtime.webUrl === 'string' && runtime.webUrl !== '') {
+      return normalizeBase(runtime.webUrl)
+    }
+  } catch {
+    // No published runtime; fall back to the documented default.
+  }
+  return 'http://127.0.0.1:3080'
 }
 
 async function call(flags, path, body) {
-  const base = localBase(flags)
+  const base = await resolveLocal(flags)
   const url = `${base}/api/dsh-fleet${path}`
   const response = await fetch(url, body === undefined
     ? { headers: { accept: 'application/json' } }

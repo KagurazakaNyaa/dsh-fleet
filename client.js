@@ -27,6 +27,7 @@ window.__ModuleLoader__.load({
         edit: '编辑',
         remove: '删除',
         open: '打开',
+        copyLink: '复制链接',
         test: '检查',
         testing: '检查中',
         online: '在线',
@@ -52,6 +53,8 @@ window.__ModuleLoader__.load({
         copyFailed: '复制失败，请手动选中文本',
         rotate: '轮换',
         rotated: '配对码已轮换，旧码立即失效',
+        webAddressLabel: 'Web 地址',
+        peerAddressLabel: 'Peer 地址',
         peersTitle: '互联',
         pair: '配对',
         modeToken: '启动令牌',
@@ -94,6 +97,7 @@ window.__ModuleLoader__.load({
         edit: 'Edit',
         remove: 'Remove',
         open: 'Open',
+        copyLink: 'Copy link',
         test: 'Check',
         testing: 'Checking',
         online: 'online',
@@ -119,6 +123,8 @@ window.__ModuleLoader__.load({
         copyFailed: 'Copy failed — select the text manually',
         rotate: 'Rotate',
         rotated: 'Pairing code rotated; the old one stopped working',
+        webAddressLabel: 'Web URL',
+        peerAddressLabel: 'Peer address',
         peersTitle: 'Peers',
         pair: 'Pair',
         modeToken: 'Startup token',
@@ -480,8 +486,17 @@ window.__ModuleLoader__.load({
         }
       }, [t])
 
-      const checkOne = useCallback(async (instance) => {
+      const copyLaunch = useCallback(async (instance) => {
         setError('')
+        try {
+          const data = await api('/api/dsh-fleet/launch', { id: instance.id })
+          await copyText((data && data.url) || instance.url)
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [copyText])
+
+      const checkOne = useCallback(async (instance) => {        setError('')
         setStatuses((prev) => ({ ...prev, [instance.id]: { ...(prev[instance.id] || {}), pending: true } }))
         try {
           const data = await api('/api/dsh-fleet/probe', { id: instance.id })
@@ -541,6 +556,16 @@ window.__ModuleLoader__.load({
             h(Button, { onClick: () => setRevealCode(!revealCode) }, revealCode ? t.hide : t.show),
             h(Button, { onClick: () => copyText(identity.pairingCode) }, t.copy),
             h(Button, { onClick: rotate }, t.rotate)),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('span', { style: { fontSize: 12.5, fontWeight: 600, minWidth: 64 } }, ''),
+            h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.webAddressLabel),
+            h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12.5, letterSpacing: '0.02em' } }, identity.webUrl || '—'),
+            identity.webUrl ? h(Button, { onClick: () => copyText(identity.webUrl) }, t.copy) : null),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('span', { style: { fontSize: 12.5, fontWeight: 600, minWidth: 64 } }, ''),
+            h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.peerAddressLabel),
+            h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12.5, letterSpacing: '0.02em' } }, listener ? `${listener.host}:${listener.port}` : '—'),
+            listener ? h(Button, { onClick: () => copyText(`${listener.host}:${listener.port}`) }, t.copy) : null),
           h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.55 } }, t.identityHint)) : null,
 
         h('div', {
@@ -752,6 +777,7 @@ window.__ModuleLoader__.load({
                 instance.note ? h('span', { style: { fontSize: 12, opacity: 0.55 } }, instance.note) : null,
                 h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 8 } },
                   h(Button, { onClick: () => open(instance), primary: true }, t.open),
+                  h(Button, { onClick: () => copyLaunch(instance) }, t.copyLink),
                   h(Button, { onClick: () => checkOne(instance), disabled: Boolean(state && state.pending) }, state && state.pending ? t.testing : t.test),
                   h(Button, { onClick: () => startEdit(instance) }, t.edit),
                   h(Button, { onClick: () => remove(instance), disabled: busy }, t.remove))))

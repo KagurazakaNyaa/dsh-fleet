@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { peerPair, peerWorkspaces, startPeerServer } from './peer.js'
@@ -39,47 +39,91 @@ function peerListenPort() {
   return Number.isInteger(configured) && configured > 0 && configured < 65_536 ? configured : 3071
 }
 
+function peerListenHost() {
+  const configured = String(process.env.DSH_FLEET_HOST || '').trim()
+  if (configured === '') return '127.0.0.1'
+  return configured
+}
+
+function runtimeFile() {
+  return path.join(dshHome(), 'dsh-fleet', 'runtime.json')
+}
+
+/**
+ * Desktop picks a random web port every launch and prints nothing to a
+ * terminal, so the live origin is published for the CLI and for the UI.
+ */
+async function writeRuntime(ctx) {
+  try {
+    const port = ctx.webServer && ctx.webServer.port
+    if (!port) return
+    const file = runtimeFile()
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, `${JSON.stringify({
+      version: 1,
+      webUrl: `http://127.0.0.1:${port}`,
+      peerHost: runtime.peerHost,
+      peerPort: runtime.peerPort,
+      pid: process.pid,
+      updatedAt: Date.now(),
+    }, null, 2)}\n`, 'utf8')
+  } catch {
+    // Discovery is best effort; the UI still works without it.
+  }
+}
+
 function groupHex(hex, size = 4) {
   return String(hex).toUpperCase().match(new RegExp(`.{1,${size}}`, 'g')).join('-')
 }
 
 let identityCache = null
+let identityPromise = null
 
-async function loadIdentity() {
-  if (identityCache !== null) return identityCache
+async function readIdentityFile() {
   try {
     const parsed = JSON.parse(await readFile(identityFile(), 'utf8'))
     if (parsed && parsed.deviceId && parsed.publicKey && parsed.privateKey && parsed.pairingCode) {
-      identityCache = parsed
       return parsed
     }
   } catch {
-    // Fall through and mint a new device identity.
+    // No usable identity on disk yet.
+  }
+  return null
+}
+
+async function mintIdentity() {
+  const existing = await readIdentityFile()
+  if (existing !== null) {
+    identityCache = existing
+    return existing
   }
   const { publicKey, privateKey } = generateKeyPairSync('ed25519')
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
   const der = publicKey.export({ type: 'spki', format: 'der' })
-  const identity = {
+  return await persistIdentity({
     version: 1,
     deviceId: groupHex(createHash('sha256').update(der).digest().subarray(0, 16).toString('hex')),
     pairingCode: groupHex(randomBytes(12).toString('hex')),
     publicKey: publicPem,
     privateKey: privatePem,
     createdAt: Date.now(),
+  })
+}
+
+/**
+ * One identity per process, including the first concurrent callers: the
+ * in-flight promise is shared so two simultaneous readers cannot mint two
+ * different key pairs.
+ */
+async function loadIdentity() {
+  if (identityCache !== null) return identityCache
+  if (identityPromise === null) {
+    identityPromise = mintIdentity().finally(() => {
+      identityPromise = null
+    })
   }
-  const file = identityFile()
-  await mkdir(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.tmp`
-  await writeFile(tmp, `${JSON.stringify(identity, null, 2)}\n`, 'utf8')
-  await rename(tmp, file)
-  try {
-    await chmod(file, 0o600)
-  } catch {
-    // POSIX-only; Windows inherits the profile directory ACL.
-  }
-  identityCache = identity
-  return identity
+  return await identityPromise
 }
 
 function emptyState() {
@@ -365,6 +409,7 @@ async function handleIdentity(ctx, req, res) {
   sendJson(res, 200, {
     ...publicIdentity(identity),
     name: os.hostname(),
+    webUrl: ctx.webServer && ctx.webServer.port ? `http://127.0.0.1:${ctx.webServer.port}` : '',
     tokenAvailable: ownWebToken(ctx) !== '',
     listener: { host: runtime.peerHost, port: runtime.peerPort, error: runtime.peerError },
   })
@@ -598,6 +643,7 @@ export function apply(ctx) {
         const info = await peerServer.start()
         runtime.peerPort = info.port
         runtime.peerError = ''
+        await writeRuntime(ctx)
       } catch (error) {
         runtime.peerError = String((error && error.message) || error)
         console.warn(`[dsh-fleet] peer listener unavailable: ${runtime.peerError}`)
@@ -609,6 +655,10 @@ export function apply(ctx) {
     return () => {
       disposed = true
       if (peerServer !== null) void peerServer.close()
+      void unlink(runtimeFile()).catch(() => {})
     }
   }, 'dsh-fleet: peer listener')
+
+  runtime.peerHost = peerListenHost()
+  void writeRuntime(ctx)
 }
