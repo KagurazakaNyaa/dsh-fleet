@@ -98,6 +98,8 @@ window.__ModuleLoader__.load({
         openOwnerUi: '打开属主界面',
         approveOnce: '允许一次',
         reject: '拒绝',
+        submitAnswer: '提交回答',
+        answerNeeds: '每个问题都要选一项或填写自定义',
       },
       en: {
         section: 'DSH Fleet',
@@ -191,6 +193,8 @@ window.__ModuleLoader__.load({
         openOwnerUi: 'Open owner UI',
         approveOnce: 'Allow once',
         reject: 'Reject',
+        submitAnswer: 'Submit answer',
+        answerNeeds: 'Pick an option or type a custom answer for every question',
       },
     }
 
@@ -312,6 +316,7 @@ window.__ModuleLoader__.load({
       const [taskFor, setTaskFor] = useState('')
       const [taskDraft, setTaskDraft] = useState({})
       const [taskWorkspace, setTaskWorkspace] = useState({})
+      const [taskAnswers, setTaskAnswers] = useState({})
       const loginUsed = useRef(new Set())
 
       const probe = useCallback(async (list) => {
@@ -513,6 +518,7 @@ window.__ModuleLoader__.load({
                 messages: task.messages.concat(incoming),
                 running: data && data.running === true,
                 approvals: (data && Array.isArray(data.approvals)) ? data.approvals : (task.approvals || []),
+                questions: (data && Array.isArray(data.questions)) ? data.questions : (task.questions || []),
               },
             }
           })
@@ -535,7 +541,7 @@ window.__ModuleLoader__.load({
           const data = await api('/api/dsh-fleet/peers/task', { deviceId: peer.deviceId, workspaceId, text })
           setTasks((prev) => ({
             ...prev,
-            [data.taskId]: { deviceId: peer.deviceId, sessionId: data.sessionId, messages: [], approvals: [], running: true },
+            [data.taskId]: { deviceId: peer.deviceId, sessionId: data.sessionId, messages: [], approvals: [], questions: [], running: true },
           }))
           setTaskPeer((prev) => ({ ...prev, [peer.deviceId]: data.taskId }))
           setTaskDraft((prev) => ({ ...prev, [peer.deviceId]: '' }))
@@ -557,6 +563,41 @@ window.__ModuleLoader__.load({
           setError(harnessError.message)
         }
       }, [pollTask])
+
+      const setAnswer = useCallback((taskId, questionId, patch) => {
+        setTaskAnswers((prev) => {
+          const answers = prev[taskId] || {}
+          const current = answers[questionId] || { selected: [], custom: '' }
+          return { ...prev, [taskId]: { ...answers, [questionId]: { ...current, ...patch } } }
+        })
+      }, [])
+
+      const submitAnswers = useCallback(async (taskId, entry) => {
+        const state = taskAnswers[taskId] || {}
+        const answers = []
+        for (const question of entry.questions) {
+          const value = state[question.id] || { selected: [], custom: '' }
+          const selected = question.multiSelect ? value.selected : value.selected.slice(0, 1)
+          const custom = String(value.custom || '').trim()
+          if (selected.length === 0 && custom === '') {
+            setError(t.answerNeeds)
+            return
+          }
+          answers.push({ id: question.id, selected, ...(custom === '' ? {} : { custom }) })
+        }
+        setError('')
+        try {
+          await api('/api/dsh-fleet/peers/task/answer', { taskId, questionId: entry.id, answers })
+          setTaskAnswers((prev) => {
+            const next = { ...prev }
+            delete next[taskId]
+            return next
+          })
+          await pollTask(taskId)
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [pollTask, t, taskAnswers])
       useEffect(() => {
         if (activeTaskIds === '') return undefined
         const ids = activeTaskIds.split(',')
@@ -918,6 +959,60 @@ window.__ModuleLoader__.load({
                                     h(Button, {
                                       onClick: () => decideApproval(taskPeer[peer.deviceId], approval.id, 'rejected'),
                                     }, t.reject)))))
+                            : null,
+                          task.questions && task.questions.length > 0
+                            ? h('div', {
+                                style: {
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 6,
+                                  marginTop: 4,
+                                  padding: '6px 8px',
+                                  borderRadius: 8,
+                                  border: '1px solid color-mix(in srgb, #38bdf8 40%, transparent)',
+                                  background: 'color-mix(in srgb, #38bdf8 8%, transparent)',
+                                },
+                              },
+                                task.questions.map((entry) => h('div', {
+                                  key: entry.id,
+                                  style: { display: 'flex', flexDirection: 'column', gap: 5 },
+                                },
+                                  entry.questions.map((question) => {
+                                    const value = ((taskAnswers[task.id] || {})[question.id]) || { selected: [], custom: '' }
+                                    const toggle = (label) => {
+                                      if (question.multiSelect) {
+                                        const selected = value.selected.includes(label)
+                                          ? value.selected.filter((item) => item !== label)
+                                          : value.selected.concat(label)
+                                        setAnswer(task.id, question.id, { selected })
+                                      } else {
+                                        setAnswer(task.id, question.id, { selected: [label] })
+                                      }
+                                    }
+                                    return h('div', {
+                                      key: question.id,
+                                      style: { display: 'flex', flexDirection: 'column', gap: 4 },
+                                    },
+                                      question.header
+                                        ? h('div', { style: { fontSize: 11.5, opacity: 0.6 } }, question.header)
+                                        : null,
+                                      h('div', { style: { fontSize: 12 } }, question.question),
+                                      question.options.length > 0
+                                        ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                                            question.options.map((option) => h(Button, {
+                                              key: option.label,
+                                              primary: value.selected.includes(option.label),
+                                              onClick: () => toggle(option.label),
+                                            }, option.label)))
+                                        : null,
+                                      h('input', {
+                                        value: value.custom,
+                                        placeholder: '…',
+                                        onChange: (event) => setAnswer(task.id, question.id, { custom: event.target.value }),
+                                        style: { ...inputStyle, width: 220 },
+                                      }))
+                                  }),
+                                  h('div', null, h(Button, { primary: true, onClick: () => submitAnswers(task.id, entry) }, t.submitAnswer)))))
                             : null,
                           h('div', null, h(Button, { onClick: () => openUi(peer) }, t.openOwnerUi)))
                       : null)

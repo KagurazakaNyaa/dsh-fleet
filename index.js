@@ -6,6 +6,8 @@ import {
   peerApprovalRespond,
   peerApprovals,
   peerPair,
+  peerQuestionRespond,
+  peerQuestions,
   peerSessionCreate,
   peerSessionPrompt,
   peerSessionTail,
@@ -502,6 +504,7 @@ async function tailSessionForPeer(ctx, sessionId, since) {
 
 const fleetSessions = new Map()
 const pendingApprovals = new Map()
+const pendingQuestions = new Map()
 
 async function createSessionForPeer(ctx, workspaceId, deviceId) {
   const controller = ctx.get('sessionController')
@@ -557,6 +560,82 @@ function respondApprovalForPeer(deviceId, id, outcome) {
   if (!pending || pending.deviceId !== deviceId) return false
   if (outcome !== 'allowed-once' && outcome !== 'rejected' && outcome !== 'cancelled') return false
   pending.answer(outcome)
+  return true
+}
+
+async function handleQuestionsRequest(request, next) {
+  const sessionId = request && request.agent && request.agent.id
+  if (!sessionId || !fleetSessions.has(sessionId)) return await next()
+  const deviceId = fleetSessions.get(sessionId)
+  const questions = (Array.isArray(request.questions) ? request.questions : [])
+    .map((question) => ({
+      id: String(question.id || ''),
+      question: String(question.question || ''),
+      header: String(question.header || ''),
+      detail: String(question.detail || ''),
+      multiSelect: question.multiSelect === true,
+      options: (Array.isArray(question.options) ? question.options : []).map((option) => ({
+        label: String(option.label || ''),
+        description: String(option.description || ''),
+      })),
+    }))
+    .filter((question) => question.id !== '')
+  if (questions.length === 0) return await next()
+  const id = randomUUID()
+  const answer = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingQuestions.delete(id)
+      resolve(null)
+    }, 120_000)
+    pendingQuestions.set(id, {
+      id,
+      sessionId,
+      deviceId,
+      questions,
+      createdAt: Date.now(),
+      answer(value) {
+        clearTimeout(timer)
+        pendingQuestions.delete(id)
+        resolve(value)
+      },
+    })
+  })
+  if (answer === null) return await next()
+  return answer
+}
+
+function listQuestionsForPeer(deviceId) {
+  return [...pendingQuestions.values()]
+    .filter((item) => item.deviceId === deviceId)
+    .map((item) => ({
+      id: item.id,
+      sessionId: item.sessionId,
+      questions: item.questions,
+      createdAt: item.createdAt,
+    }))
+}
+
+function respondQuestionForPeer(deviceId, id, answers) {
+  const pending = pendingQuestions.get(id)
+  if (!pending || pending.deviceId !== deviceId) return false
+  const byId = new Map()
+  for (const answer of answers) {
+    if (!answer || typeof answer.id !== 'string') return false
+    const question = pending.questions.find((item) => item.id === answer.id)
+    if (!question) return false
+    const selected = Array.isArray(answer.selected)
+      ? answer.selected.filter((value) => typeof value === 'string')
+      : []
+    const labels = new Set(question.options.map((option) => option.label))
+    for (const value of selected) {
+      if (!labels.has(value)) return false
+    }
+    const custom = typeof answer.custom === 'string' && answer.custom !== '' ? answer.custom : undefined
+    if (selected.length === 0 && custom === undefined) return false
+    byId.set(answer.id, { id: answer.id, selected, ...(custom === undefined ? {} : { custom }) })
+  }
+  if (byId.size !== pending.questions.length) return false
+  pending.answer({ answers: [...byId.values()] })
   return true
 }
 
@@ -830,17 +909,24 @@ async function handleTaskPoll(req, res) {
   } catch {
     approvals = []
   }
+  let questions = []
+  try {
+    const all = await peerQuestions({ address: peer.address, identity })
+    questions = all.filter((item) => item.sessionId === task.sessionId)
+  } catch {
+    questions = []
+  }
   sendJson(res, 200, {
     sessionId: task.sessionId,
     messages: (tail && tail.frames) || [],
     running: Boolean(tail && tail.running),
     approvals,
+    questions,
     cursor: task.cursor,
   })
 }
 
-async function handleTaskApprove(req, res) {
-  const body = await readBody(req)
+async function handleTaskApprove(req, res) {  const body = await readBody(req)
   const task = tasks.get(String(body.taskId || ''))
   if (!task) {
     sendJson(res, 404, { message: 'task-not-found' })
@@ -859,6 +945,29 @@ async function handleTaskApprove(req, res) {
   }
   const identity = toPeerIdentity(await loadIdentity())
   await peerApprovalRespond({ address: peer.address, identity, id, outcome })
+  sendJson(res, 200, { accepted: true })
+}
+
+async function handleTaskAnswer(req, res) {
+  const body = await readBody(req)
+  const task = tasks.get(String(body.taskId || ''))
+  if (!task) {
+    sendJson(res, 404, { message: 'task-not-found' })
+    return
+  }
+  const peer = await peerStore.getPeer(task.deviceId)
+  if (!peer) {
+    sendJson(res, 404, { message: 'peer-not-found' })
+    return
+  }
+  const id = cleanText(body.questionId, 100)
+  const answers = Array.isArray(body.answers) ? body.answers : null
+  if (id === '' || answers === null) {
+    sendJson(res, 400, { message: 'question-id-and-answers-required' })
+    return
+  }
+  const identity = toPeerIdentity(await loadIdentity())
+  await peerQuestionRespond({ address: peer.address, identity, id, answers })
   sendJson(res, 200, { accepted: true })
 }
 
@@ -953,6 +1062,7 @@ export function apply(ctx) {
     ['/peers/task', 'POST', handlePeerTask],
     ['/peers/task/poll', 'POST', handleTaskPoll],
     ['/peers/task/approve', 'POST', handleTaskApprove],
+    ['/peers/task/answer', 'POST', handleTaskAnswer],
     ['/peers/delete', 'POST', handlePeerDelete],
     ['/workspaces', 'GET', (req, res) => handleLocalWorkspaces(ctx, req, res)],
   ]
@@ -976,6 +1086,7 @@ export function apply(ctx) {
   }
 
   ctx.on('approval/request', (request, next) => handleApprovalRequest(request, next), { prepend: true, global: true })
+  ctx.on('user-questions/request', (request, next) => handleQuestionsRequest(request, next), { prepend: true, global: true })
 
   ctx.effect(() => {
     let peerServer = null
@@ -993,6 +1104,8 @@ export function apply(ctx) {
         tailSession: (sessionId, since) => tailSessionForPeer(ctx, sessionId, since),
         listApprovals: (deviceId) => listApprovalsForPeer(deviceId),
         respondApproval: (deviceId, id, outcome) => respondApprovalForPeer(deviceId, id, outcome),
+        listQuestions: (deviceId) => listQuestionsForPeer(deviceId),
+        respondQuestion: (deviceId, id, answers) => respondQuestionForPeer(deviceId, id, answers),
         verifyToken: (candidate) => verifyWebToken(ctx, candidate),
         tunnelTargetPort: Number(ctx.webServer && ctx.webServer.port) || 0,
         name: os.hostname(),

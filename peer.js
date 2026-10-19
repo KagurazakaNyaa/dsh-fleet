@@ -243,6 +243,36 @@ export function startPeerServer(options) {
           return
         }
 
+        if (req.method === 'GET' && path === '/session/questions') {
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, Buffer.alloc(0), publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const questions = typeof options.listQuestions === 'function' ? options.listQuestions(peer.deviceId) : []
+          sendJson(res, 200, { protocol: PROTOCOL, questions })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/session/questions/respond') {
+          const raw = await readRawBody(req)
+          const callerId = headerValue(req, 'x-fleet-device')
+          const peer = await store.getPeer(callerId)
+          if (!peer || peer.sessionAccess !== true) throw new PeerError(403, 'session-access-required')
+          const signedBy = verifySignature(req, raw, publicKeyFromDerBase64(peer.publicKey), seenNonces)
+          if (signedBy !== peer.deviceId) throw new PeerError(403, 'device-id-mismatch')
+          const body = raw.length === 0 ? {} : JSON.parse(raw.toString('utf8'))
+          const id = typeof body.id === 'string' ? body.id : ''
+          const answers = Array.isArray(body.answers) ? body.answers : null
+          if (id === '' || answers === null) throw new PeerError(400, 'id-and-answers-required')
+          const accepted = typeof options.respondQuestion === 'function'
+            ? options.respondQuestion(peer.deviceId, id, answers)
+            : false
+          if (!accepted) throw new PeerError(404, 'question-not-found')
+          sendJson(res, 200, { protocol: PROTOCOL, accepted: true })
+          return
+        }
+
         if (req.method === 'GET' && path === '/session/approvals') {
           const callerId = headerValue(req, 'x-fleet-device')
           const peer = await store.getPeer(callerId)
@@ -491,6 +521,20 @@ export async function peerApprovalRespond(options) {
     method: 'POST',
     path: '/session/approvals/respond',
     body: { id: options.id, outcome: options.outcome },
+  })
+}
+
+export async function peerQuestions(options) {
+  const data = await signedCall({ ...options, method: 'GET', path: '/session/questions', timeoutMs: options.timeoutMs ?? 4000 })
+  return (data && data.questions) || []
+}
+
+export async function peerQuestionRespond(options) {
+  return await signedCall({
+    ...options,
+    method: 'POST',
+    path: '/session/questions/respond',
+    body: { id: options.id, answers: options.answers },
   })
 }
 

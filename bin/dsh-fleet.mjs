@@ -34,6 +34,8 @@ const HELP = `dsh-fleet CLI
   task-poll <taskId>           read new events of a submitted task
   task-approve <taskId> <approvalId> [allow|deny]
                                answer a pending approval on the owner
+  task-answer <taskId> <questionId> <json>
+                               answer a pending question, e.g. '[{"id":"q1","selected":["staging"]}]'
   session-access <deviceId> [--revoke]
                                allow or revoke a peer's access to this session list
   grant <deviceId> <wsId> [--revoke]
@@ -194,6 +196,18 @@ async function main() {
   if (command === 'session-access') {
     if (!first) throw new Error('session-access requires <deviceId>')
     print(await call(flags, '/peers/session-access', { deviceId: first, allow: flags.revoke !== true }), flags)
+    return
+  }
+
+  if (command === 'task-answer') {
+    if (!first || !second || positional.length < 4) throw new Error('task-answer requires <taskId> <questionId> <json>')
+    let answers
+    try {
+      answers = JSON.parse(positional.slice(3).join(' '))
+    } catch {
+      throw new Error('answers must be a JSON array')
+    }
+    print(await call(flags, '/peers/task/answer', { taskId: first, questionId: second, answers }), flags)
     return
   }
 
