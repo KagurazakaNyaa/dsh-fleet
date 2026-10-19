@@ -4,7 +4,7 @@ Peer-to-peer control plane for [DeepSeek Harness](https://github.com/deepseek-ai
 
 多个 DSH 实例互相配对，共享**工作区引用**与在线状态；数据从不复制——会话、文件、模型凭据、插件配置永远留在属主实例上。
 
-> 状态：v0.1。设备身份、配对码、实例登记、探活与打开已可用；peer 通道（`hello` / `pair` / `workspaces`，Ed25519 逐请求签名）已实现并通过单元与集成测试，设置页的 peer UI 待接入。
+> 状态：v0.1。设备身份、配对码、实例登记、探活、peer 互联（配对 / 工作区目录 / 授权）与无头 CLI 已可用；P2 属主 UI 代理待做。
 
 ## 设计边界
 
@@ -128,7 +128,7 @@ dsh plugin --profile web add ./dsh-fleet
 
 ## 路线图
 
-1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验 —— 协议已完成，设置页 peer UI 待接入。
+1. **P1 互联**：peer 监听（默认 `127.0.0.1:3071`）、`hello`、`pair`、`workspaces`、签名校验、设置页 peer 面板 —— 已完成。
 2. **P2 呈现**：属主 UI 代理（反代 + `authenticatedUrl`，不落盘），点远程工作区直接打开属主界面。
 3. **P3 会话流**：在属主建会话、订阅事件、回传输入与审批，本地只渲染。
 4. **P4 网络**：局域网发现、中继、跨网。
