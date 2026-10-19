@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH Fleet",
+    "description": "Keeps a registry of DSH instances, probes their health and opens each instance's Web UI from one Settings page."
+  }
+}

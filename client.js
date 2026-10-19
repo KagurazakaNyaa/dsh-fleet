@@ -1,0 +1,550 @@
+window.__ModuleLoader__.load({
+  id: 'dsh-fleet',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+    const { useCallback, useEffect, useMemo, useState } = React
+
+    const COPY = {
+      zh: {
+        section: 'DSH 集群',
+        title: 'DSH 集群',
+        subtitle: '登记多台 DSH 实例：保存地址与访问令牌，检查在线状态，一键打开对应界面。',
+        add: '添加实例',
+        empty: '还没有登记实例。可先添加本机另一个端口的 DSH，或经 SSH 转发到本机的远程实例。',
+        name: '名称',
+        namePlaceholder: '例如：训练机 4090',
+        url: '地址',
+        urlPlaceholder: 'http://127.0.0.1:3080',
+        token: '访问令牌（可选）',
+        tokenPlaceholder: '启动 dsh web 时打印的 token',
+        tags: '标签（逗号分隔）',
+        tagsPlaceholder: 'gpu, 内网',
+        note: '备注',
+        notePlaceholder: '用途、登录方式等',
+        save: '保存',
+        cancel: '取消',
+        edit: '编辑',
+        remove: '删除',
+        open: '打开',
+        test: '检查',
+        testing: '检查中',
+        online: '在线',
+        offline: '离线',
+        unknown: '未检查',
+        checking: '检查中…',
+        confirmRemove: '删除这条实例记录？（不会停止任何进程）',
+        loadFailed: '读取实例列表失败',
+        saveFailed: '保存失败',
+        probeFailed: '检查失败',
+        opened: '已在新标签页打开',
+        tokenNote: '令牌以明文保存在本机 DSH_HOME/dsh-fleet/instances.json，不会发送给模型。',
+        count: (n) => `共 ${n} 个实例`,
+        lastChecked: '上次检查',
+        deviceId: '设备 ID',
+        pairingCode: '配对码',
+        identityTitle: '本机身份',
+        identityHint: '把配对码交给对方，或核对对方的设备 ID。之后双方用设备公钥签名验证，配对码只用于首次互联。',
+        show: '显示',
+        hide: '隐藏',
+        copy: '复制',
+        copied: '已复制',
+        copyFailed: '复制失败，请手动选中文本',
+        rotate: '轮换',
+        rotated: '配对码已轮换，旧码立即失效',
+      },
+      en: {
+        section: 'DSH Fleet',
+        title: 'DSH Fleet',
+        subtitle: 'Register DSH instances, keep their URLs and tokens, check health, and open each Web UI in one place.',
+        add: 'Add instance',
+        empty: 'No instances yet. Add another local DSH on a different port, or a remote one forwarded to this machine over SSH.',
+        name: 'Name',
+        namePlaceholder: 'e.g. Training box 4090',
+        url: 'URL',
+        urlPlaceholder: 'http://127.0.0.1:3080',
+        token: 'Access token (optional)',
+        tokenPlaceholder: 'The token printed when dsh web starts',
+        tags: 'Tags (comma separated)',
+        tagsPlaceholder: 'gpu, intranet',
+        note: 'Note',
+        notePlaceholder: 'Purpose, how to log in, …',
+        save: 'Save',
+        cancel: 'Cancel',
+        edit: 'Edit',
+        remove: 'Remove',
+        open: 'Open',
+        test: 'Check',
+        testing: 'Checking',
+        online: 'online',
+        offline: 'offline',
+        unknown: 'not checked',
+        checking: 'checking…',
+        confirmRemove: 'Remove this instance record? No process will be stopped.',
+        loadFailed: 'Failed to load instances',
+        saveFailed: 'Failed to save',
+        probeFailed: 'Check failed',
+        opened: 'Opened in a new tab',
+        tokenNote: 'Tokens are stored in plain text in DSH_HOME/dsh-fleet/instances.json and are never sent to the model.',
+        count: (n) => `${n} instance${n === 1 ? '' : 's'}`,
+        lastChecked: 'Last checked',
+        deviceId: 'Device ID',
+        pairingCode: 'Pairing code',
+        identityTitle: 'This device',
+        identityHint: 'Hand the pairing code to the other side, or compare device IDs. After the first link, both sides verify each other with the device key.',
+        show: 'Show',
+        hide: 'Hide',
+        copy: 'Copy',
+        copied: 'Copied',
+        copyFailed: 'Copy failed — select the text manually',
+        rotate: 'Rotate',
+        rotated: 'Pairing code rotated; the old one stopped working',
+      },
+    }
+
+    function copy() {
+      const lang = (typeof navigator !== 'undefined' && navigator.language) || 'en'
+      return String(lang).toLowerCase().startsWith('zh') ? COPY.zh : COPY.en
+    }
+
+    const inputStyle = {
+      font: 'inherit',
+      fontSize: 13,
+      color: 'inherit',
+      background: 'transparent',
+      border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
+      borderRadius: 8,
+      padding: '7px 10px',
+      width: '100%',
+      boxSizing: 'border-box',
+    }
+
+    const labelStyle = { fontSize: 12, opacity: 0.72, marginBottom: 4, display: 'block' }
+
+    function Button(props) {
+      const { children, onClick, disabled, primary, title } = props
+      return h('button', {
+        type: 'button',
+        title,
+        disabled: Boolean(disabled),
+        onClick,
+        style: {
+          font: 'inherit',
+          fontSize: 12.5,
+          lineHeight: 1.4,
+          color: primary ? '#ffffff' : 'inherit',
+          background: primary ? '#0284c7' : 'color-mix(in srgb, currentColor 8%, transparent)',
+          border: primary ? '1px solid transparent' : '1px solid color-mix(in srgb, currentColor 18%, transparent)',
+          borderRadius: 8,
+          padding: '5px 11px',
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+        },
+      }, children)
+    }
+
+    function Field(props) {
+      const { label, value, placeholder, onChange, type } = props
+      return h('label', { style: { display: 'block' } },
+        h('span', { style: labelStyle }, label),
+        h('input', {
+          type: type || 'text',
+          value,
+          placeholder,
+          spellCheck: false,
+          autoComplete: 'off',
+          onChange: (event) => onChange(event.target.value),
+          style: inputStyle,
+        }))
+    }
+
+    async function api(path, body) {
+      const options = body === undefined
+        ? { method: 'GET', headers: { accept: 'application/json' } }
+        : {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify(body),
+          }
+      const response = await fetch(path, options)
+      const text = await response.text()
+      let data = null
+      if (text) {
+        try {
+          data = JSON.parse(text)
+        } catch {
+          data = null
+        }
+      }
+      if (!response.ok) {
+        throw new Error((data && data.message) || `HTTP ${response.status}`)
+      }
+      return data
+    }
+
+    function statusOf(entry) {
+      if (!entry) return { tone: 'unknown', text: 'unknown' }
+      if (entry.pending) return { tone: 'pending', text: 'checking…' }
+      if (entry.ok) return { tone: 'online', text: 'online' }
+      return { tone: 'offline', text: 'offline' }
+    }
+
+    const DOT = {
+      online: '#22c55e',
+      offline: '#ef4444',
+      pending: '#f59e0b',
+      unknown: '#94a3b8',
+    }
+
+    function Section() {
+      const t = copy()
+      const [instances, setInstances] = useState([])
+      const [statuses, setStatuses] = useState({})
+      const [draft, setDraft] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+      const [home, setHome] = useState('')
+      const [checkedAt, setCheckedAt] = useState(0)
+      const [identity, setIdentity] = useState(null)
+      const [revealCode, setRevealCode] = useState(false)
+
+      const probe = useCallback(async (list) => {
+        if (!list || list.length === 0) return
+        setStatuses((prev) => {
+          const next = { ...prev }
+          for (const item of list) next[item.id] = { ...(next[item.id] || {}), pending: true }
+          return next
+        })
+        try {
+          const data = await api('/api/dsh-fleet/probe', {})
+          const next = {}
+          for (const result of (data && data.results) || []) {
+            next[result.id] = { ...result, pending: false }
+          }
+          setStatuses(next)
+          setCheckedAt((data && data.probedAt) || Date.now())
+        } catch (harnessError) {
+          setError(`${t.probeFailed}: ${harnessError.message}`)
+          setStatuses((prev) => {
+            const next = { ...prev }
+            for (const item of list) next[item.id] = { ...(next[item.id] || {}), pending: false }
+            return next
+          })
+        }
+      }, [t])
+
+      const load = useCallback(async () => {
+        try {
+          const data = await api('/api/dsh-fleet/state')
+          const list = (data && data.instances) || []
+          setInstances(list)
+          setHome((data && data.home) || '')
+          setError('')
+          try {
+            setIdentity(await api('/api/dsh-fleet/identity'))
+          } catch {
+            setIdentity(null)
+          }
+          await probe(list)
+        } catch (harnessError) {
+          setError(`${t.loadFailed}: ${harnessError.message}`)
+        }
+      }, [probe, t])
+
+      useEffect(() => {
+        void load()
+      }, [load])
+
+      const copyText = useCallback(async (value) => {
+        try {
+          await navigator.clipboard.writeText(value)
+          setNotice(t.copied)
+        } catch {
+          setError(t.copyFailed)
+        }
+      }, [t])
+
+      const rotate = useCallback(async () => {
+        try {
+          setIdentity(await api('/api/dsh-fleet/identity/rotate', {}))
+          setRevealCode(true)
+          setNotice(t.rotated)
+        } catch (harnessError) {
+          setError(harnessError.message)
+        }
+      }, [t])
+
+      const startAdd = useCallback(() => {
+        setNotice('')
+        setDraft({ name: '', url: 'http://127.0.0.1:', token: '', tags: '', note: '' })
+      }, [])
+
+      const startEdit = useCallback((instance) => {
+        setNotice('')
+        setDraft({
+          id: instance.id,
+          name: instance.name,
+          url: instance.url,
+          token: instance.token || '',
+          tags: (instance.tags || []).join(', '),
+          note: instance.note || '',
+        })
+      }, [])
+
+      const save = useCallback(async () => {
+        if (!draft || busy) return
+        setBusy(true)
+        setError('')
+        try {
+          const payload = {
+            id: draft.id,
+            name: draft.name,
+            url: draft.url,
+            token: draft.token,
+            note: draft.note,
+            tags: String(draft.tags || '').split(','),
+          }
+          const data = await api('/api/dsh-fleet/save', payload)
+          const list = (data && data.instances) || []
+          setInstances(list)
+          setDraft(null)
+          setNotice('')
+          await probe(list)
+        } catch (harnessError) {
+          setError(`${t.saveFailed}: ${harnessError.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [busy, draft, probe, t])
+
+      const remove = useCallback(async (instance) => {
+        if (!window.confirm(t.confirmRemove)) return
+        setBusy(true)
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/delete', { id: instance.id })
+          setInstances((data && data.instances) || [])
+          setStatuses((prev) => {
+            const next = { ...prev }
+            delete next[instance.id]
+            return next
+          })
+        } catch (harnessError) {
+          setError(`${harnessError.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [t])
+
+      const open = useCallback(async (instance) => {
+        setError('')
+        try {
+          const data = await api('/api/dsh-fleet/launch', { id: instance.id })
+          const url = (data && data.url) || instance.url
+          const link = document.createElement('a')
+          link.href = url
+          link.target = '_blank'
+          link.rel = 'noopener noreferrer'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setNotice(t.opened)
+        } catch (harnessError) {
+          setError(`${harnessError.message}`)
+        }
+      }, [t])
+
+      const checkOne = useCallback(async (instance) => {
+        setError('')
+        setStatuses((prev) => ({ ...prev, [instance.id]: { ...(prev[instance.id] || {}), pending: true } }))
+        try {
+          const data = await api('/api/dsh-fleet/probe', { id: instance.id })
+          const result = data && data.results && data.results[0]
+          if (result) setStatuses((prev) => ({ ...prev, [instance.id]: { ...result, pending: false } }))
+          setCheckedAt(Date.now())
+        } catch (harnessError) {
+          setError(`${t.probeFailed}: ${harnessError.message}`)
+          setStatuses((prev) => ({ ...prev, [instance.id]: { ...(prev[instance.id] || {}), pending: false } }))
+        }
+      }, [t])
+
+      const summary = useMemo(() => {
+        const total = instances.length
+        const online = instances.filter((item) => statuses[item.id] && statuses[item.id].ok).length
+        return `${t.count(total)} · ${online} ${t.online}`
+      }, [instances, statuses, t])
+
+      return h('div', {
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+          padding: '2px 0 28px',
+          maxWidth: 900,
+          font: 'inherit',
+          color: 'inherit',
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' } },
+          h('div', { style: { flex: '1 1 320px', minWidth: 240 } },
+            h('div', { style: { fontSize: 15, fontWeight: 600 } }, t.title),
+            h('div', { style: { fontSize: 12.5, opacity: 0.72, marginTop: 4, lineHeight: 1.55 } }, t.subtitle)),
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            h(Button, { onClick: load, title: t.test }, '↻'),
+            h(Button, { onClick: startAdd, primary: true }, `+ ${t.add}`))),
+
+        identity ? h('div', {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 7,
+            border: '1px solid color-mix(in srgb, currentColor 16%, transparent)',
+            borderRadius: 12,
+            padding: '10px 14px',
+          },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('span', { style: { fontSize: 12.5, fontWeight: 600, minWidth: 64 } }, t.identityTitle),
+            h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.deviceId),
+            h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12.5, letterSpacing: '0.02em' } }, identity.deviceId),
+            h(Button, { onClick: () => copyText(identity.deviceId) }, t.copy)),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('span', { style: { fontSize: 12.5, fontWeight: 600, minWidth: 64 } }, ''),
+            h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, t.pairingCode),
+            h('code', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12.5, letterSpacing: '0.02em' } }, revealCode ? identity.pairingCode : '••••-••••-••••-••••-••••-••••'),
+            h(Button, { onClick: () => setRevealCode(!revealCode) }, revealCode ? t.hide : t.show),
+            h(Button, { onClick: () => copyText(identity.pairingCode) }, t.copy),
+            h(Button, { onClick: rotate }, t.rotate)),
+          h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.55 } }, t.identityHint)) : null,
+
+        h('div', { style: { fontSize: 12, opacity: 0.62, display: 'flex', gap: 12, flexWrap: 'wrap' } },
+          h('span', null, summary),
+          checkedAt ? h('span', null, `${t.lastChecked} ${new Date(checkedAt).toLocaleTimeString()}`) : null,
+          home ? h('span', { style: { opacity: 0.8 } }, home) : null),
+
+        error ? h('div', {
+          style: {
+            fontSize: 12.5,
+            color: '#fca5a5',
+            border: '1px solid color-mix(in srgb, #ef4444 45%, transparent)',
+            background: 'color-mix(in srgb, #ef4444 12%, transparent)',
+            borderRadius: 8,
+            padding: '7px 10px',
+          },
+        }, error) : null,
+
+        notice ? h('div', {
+          style: {
+            fontSize: 12.5,
+            border: '1px solid color-mix(in srgb, #22c55e 40%, transparent)',
+            background: 'color-mix(in srgb, #22c55e 12%, transparent)',
+            borderRadius: 8,
+            padding: '7px 10px',
+          },
+        }, notice) : null,
+
+        draft ? h('div', {
+          style: {
+            display: 'grid',
+            gap: 10,
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            border: '1px solid color-mix(in srgb, currentColor 20%, transparent)',
+            borderRadius: 12,
+            padding: 14,
+          },
+        },
+          h(Field, { label: t.name, value: draft.name, placeholder: t.namePlaceholder, onChange: (value) => setDraft({ ...draft, name: value }) }),
+          h(Field, { label: t.url, value: draft.url, placeholder: t.urlPlaceholder, onChange: (value) => setDraft({ ...draft, url: value }) }),
+          h(Field, { label: t.token, value: draft.token, placeholder: t.tokenPlaceholder, type: 'password', onChange: (value) => setDraft({ ...draft, token: value }) }),
+          h(Field, { label: t.tags, value: draft.tags, placeholder: t.tagsPlaceholder, onChange: (value) => setDraft({ ...draft, tags: value }) }),
+          h('div', { style: { gridColumn: '1 / -1' } },
+            h(Field, { label: t.note, value: draft.note, placeholder: t.notePlaceholder, onChange: (value) => setDraft({ ...draft, note: value }) })),
+          h('div', { style: { gridColumn: '1 / -1', display: 'flex', gap: 8 } },
+            h(Button, { onClick: save, primary: true, disabled: busy }, t.save),
+            h(Button, { onClick: () => setDraft(null), disabled: busy }, t.cancel))) : null,
+
+        instances.length === 0 && !draft
+          ? h('div', {
+              style: {
+                fontSize: 13,
+                opacity: 0.72,
+                lineHeight: 1.6,
+                border: '1px dashed color-mix(in srgb, currentColor 25%, transparent)',
+                borderRadius: 12,
+                padding: '18px 16px',
+              },
+            }, t.empty)
+          : null,
+
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          ...instances.map((instance) => {
+            const state = statuses[instance.id]
+            const view = statusOf(state)
+            const statusText = view.tone === 'pending'
+              ? t.checking
+              : view.tone === 'online'
+                ? (state && state.dsh ? `${t.online} · HTTP ${state.status}` : `${t.online} · HTTP ${state.status}`)
+                : view.tone === 'offline'
+                  ? `${t.offline}${state && state.error ? ` · ${state.error}` : state && state.status ? ` · HTTP ${state.status}` : ''}`
+                  : t.unknown
+            return h('div', {
+              key: instance.id,
+              style: {
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                border: '1px solid color-mix(in srgb, currentColor 16%, transparent)',
+                borderRadius: 12,
+                padding: '12px 14px',
+              },
+            },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+                h('span', {
+                  style: {
+                    width: 9,
+                    height: 9,
+                    borderRadius: 999,
+                    background: DOT[view.tone],
+                    flex: '0 0 auto',
+                    boxShadow: view.tone === 'pending' ? '0 0 0 3px color-mix(in srgb, #f59e0b 25%, transparent)' : 'none',
+                  },
+                }),
+                h('span', { style: { fontSize: 13.5, fontWeight: 600 } }, instance.name),
+                ...(instance.tags || []).map((tag) => h('span', {
+                  key: tag,
+                  style: {
+                    fontSize: 11,
+                    padding: '1px 7px',
+                    borderRadius: 999,
+                    border: '1px solid color-mix(in srgb, currentColor 20%, transparent)',
+                    opacity: 0.8,
+                  },
+                }, tag)),
+                h('span', { style: { fontSize: 12, opacity: 0.6, marginLeft: 'auto', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' } }, instance.url)),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+                h('span', { style: { fontSize: 12, opacity: 0.75 } }, statusText),
+                instance.note ? h('span', { style: { fontSize: 12, opacity: 0.55 } }, instance.note) : null,
+                h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 8 } },
+                  h(Button, { onClick: () => open(instance), primary: true }, t.open),
+                  h(Button, { onClick: () => checkOne(instance), disabled: Boolean(state && state.pending) }, state && state.pending ? t.testing : t.test),
+                  h(Button, { onClick: () => startEdit(instance) }, t.edit),
+                  h(Button, { onClick: () => remove(instance), disabled: busy }, t.remove))))
+          })),
+
+        h('div', { style: { fontSize: 11.5, opacity: 0.55, lineHeight: 1.6 } }, t.tokenNote))
+    }
+
+    return {
+      inject: ['slots'],
+      apply(ctx) {
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'dsh-fleet',
+          order: 41,
+          label: () => copy().section,
+        }, Section))
+      },
+    }
+  },
+})
